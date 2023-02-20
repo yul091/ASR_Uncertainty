@@ -27,9 +27,18 @@ def main(args):
     asr_model = EncoderDecoderASR.from_hparams(
         source=f"speechbrain/{model_name}", 
         savedir=f"pretrained_models/{model_name}", 
-        # run_opts={"device":"cuda"}, # inference on GPU
+        run_opts={"device":"cuda"}, # inference on GPU
     )
     print(asr_model)
+    
+    ###################################### Download #######################################
+    # Download + Unpacking test-clean of librispeech
+    if not os.path.exists(dataset):
+        os.makedirs(dataset)
+        MINILIBRI_TEST_URL = "https://www.openslr.org/resources/12/test-clean.tar.gz"
+        download_file(MINILIBRI_TEST_URL, 'test-clean.tar.gz')
+        shutil.unpack_archive( 'test-clean.tar.gz', '.')
+    #######################################################################################
     
     # Load metrics
     wer = load('wer')
@@ -99,12 +108,6 @@ if __name__ == "__main__":
                         help="Dataset to test for speech-to-text WER.")
     args = parser.parse_args()
     main(args)
-
-    ###################################### Download #######################################
-    # Download + Unpacking test-clean of librispeech
-    # MINILIBRI_TEST_URL = "https://www.openslr.org/resources/12/test-clean.tar.gz"
-    # download_file(MINILIBRI_TEST_URL, 'test-clean.tar.gz')
-    # shutil.unpack_archive( 'test-clean.tar.gz', '.')
 
     # ################################# Decode in the batch #################################
     # # Decode the first sentence in the batch
