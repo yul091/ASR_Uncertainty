@@ -1,6 +1,3 @@
-# pip install speechbrain
-# pip install evaluate
-# pip install jiwer 
 import os
 import sys
 sys.dont_write_bytecode = True
@@ -22,13 +19,20 @@ def main(args):
     model_name = args.model
     dataset = args.dataset
     split = "test-clean"
+    device = args.device
 
     # Load from pre-trained model
-    asr_model = EncoderDecoderASR.from_hparams(
-        source=f"speechbrain/{model_name}", 
-        savedir=f"pretrained_models/{model_name}", 
-        run_opts={"device":"cuda"}, # inference on GPU
-    )
+    if device == "cuda":
+        asr_model = EncoderDecoderASR.from_hparams(
+            source=f"speechbrain/{model_name}", 
+            savedir=f"pretrained_models/{model_name}", 
+            run_opts={"device":"cuda"}, # inference on GPU
+        )
+    else:
+        asr_model = EncoderDecoderASR.from_hparams(
+            source=f"speechbrain/{model_name}", 
+            savedir=f"pretrained_models/{model_name}",
+        )
     print(asr_model)
     
     ###################################### Download #######################################
@@ -51,12 +55,13 @@ def main(args):
     dialog_list = sorted(os.listdir(audio_folder))
     pred_file = "{}-{}-{}-{}.preds.txt".format(dataset, user, para, model_name)
     label_file = "{}/{}/{}/{}/{}-{}.trans.txt".format(dataset, split, user, para, user, para)
+    log_file = "{}-{}-{}.log".format(dataset, model_name, device)
     f = open(pred_file, 'w')
     count = 0
     res = []
     
     time1 = time.time()
-    os.system(f"sudo tegrastats --logfile {dataset}-{model_name}-energy.log &") # start logging energy
+    os.system(f"sudo tegrastats --logfile {log_file} &") # start logging energy
     for audio in tqdm(dialog_list):
         if not audio.endswith(extension):
             continue
@@ -72,13 +77,13 @@ def main(args):
         f.write("{} {}\n".format(audio.rstrip(extension), output))
     
     # Calculate WER
-    # f1 = open(pred_file, "r")
     f2 = open(label_file, "r")
     pred_res = [output for (audio, output) in res]
     label_res = [' '.join(line.split()[1:]) for line in f2.read().splitlines()]
     wer_score = wer.compute(predictions=pred_res, references=label_res)
     # print(wer_score)
-    summary = "Inference finished! Total #seqs: {}, latency: {}s, avg latency: {:.4f}s, WER: {:.4f}".format(
+    print("Inferencing finished!")
+    summary = "Total #seqs: {}, latency: {}s, avg latency: {:.4f}s, WER: {:.4f}".format(
         count, 
         time2 - time1,
         (time2 - time1) / count if count > 0 else 0,
@@ -106,6 +111,13 @@ if __name__ == "__main__":
                             "TIMIT",
                         ],
                         help="Dataset to test for speech-to-text WER.")
+    parser.add_argument("--device", "-dev", type=str,
+                        default="cuda",
+                        choices=[
+                            "cpu", 
+                            "cuda",
+                        ],
+                        help="Device to run the model on.")
     args = parser.parse_args()
     main(args)
 

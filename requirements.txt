@@ -1,3 +1,4 @@
 speechbrain
 evaluate
 jiwer
+alpaca-ml
