@@ -92,7 +92,7 @@ class ASRSlowAttacker(BaseAttacker):
     def leave_eos_target_loss(self, scores: List[torch.Tensor], seqs: list, pred_lens: list):
         loss = []
         for i, s in enumerate(scores): # s: T X V
-            print("s {}, seqs[i] {}, pred_lens[i] {}".format(s.shape, seqs[i], pred_lens[i]))
+            # print("s {}, seqs[i] {}, pred_lens[i] {}".format(s.shape, seqs[i], pred_lens[i]))
             if pred_lens[i] == 0:
                 loss.append(torch.tensor(0.0, requires_grad=True).to(self.device))
             else:
@@ -117,7 +117,7 @@ class ASRSlowAttacker(BaseAttacker):
     
     def run_attack(self, audios: torch.Tensor, wav_lens: torch.Tensor):
         dim = len(audios.shape)
-        ori_audios, curr_audios = audios.clone(), audios.clone()
+        ori_audios = audios.clone()
         ori_len = self.get_ASR_len(audios, wav_lens)
         best_adv = audios.clone()
         best_len = ori_len
@@ -128,36 +128,54 @@ class ASRSlowAttacker(BaseAttacker):
             w = self.noise.repeat(1, K)[:, :audios.shape[1]]
         else:
             w = self.noise[:, :audios.shape[1]]
-            
+        
         w = w.detach()
+        print("w", w)
+        snr_dbs = torch.tensor([20, 10, 3]).to(self.device)
+        # w = self.inverse_tanh_space(audios).detach()
         w.requires_grad = True
         optimizer = Adam([w], lr=self.lr)
         pbar = tqdm(range(self.max_iter))
-        snr_dbs = torch.tensor([20, 10, 3]).to(self.device)
         
         for it in pbar:
-            curr_audios = self.add_noise(curr_audios, w, snr_dbs)[1:2]
-            # curr_audios = curr_audios + w
-            loss = self.compute_loss(curr_audios, wav_lens)
-            curr_per = self.compute_per(curr_audios, ori_audios)
-            per_loss = self.relu(curr_per - self.max_per).sum()
+            print("w: ", w)
+            # adv_audios = self.add_noise(ori_audios, w, snr_dbs)[1:2]
+            # adv_audios = self.tanh_space(w)
+            adv_audios = w + ori_audios 
+            loss = self.compute_loss(adv_audios, wav_lens)
+            print("loss", loss)
+            # curr_per = self.compute_per(adv_audios, ori_audios)
+            # print("curr_per", curr_per)
+            # per_loss = self.relu(curr_per - self.max_per).sum()
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            # Update adversarial audios
-            curr_len = self.get_ASR_len(curr_audios, wav_lens)
-            is_best_adv = (curr_len < best_len)
-            mask = torch.tensor((1 - is_best_adv)).to(self.device) * (curr_per.detach() < self.max_per)
-            mask = mask.view([-1] + [1] * (dim - 1))
-            best_adv = mask * curr_audios.detach() + (1 - mask) * best_adv
-            mask = mask.reshape([-1]).detach().cpu().numpy()
-            best_len = mask * curr_len + (1 - mask) * best_len
+            print("w (after)", w)
             
-            log_str = "i:%d, inc:%.2f, per:%.2f, adv_loss:%.2f, per_loss:%.2f" % (
-                it, float(best_len.sum()) / float(ori_len.sum()), curr_per.mean(), loss, per_loss
+            # Update adversarial audios
+            curr_len = self.get_ASR_len(adv_audios, wav_lens)
+            is_best_adv = (curr_len > best_len)
+            # mask = torch.tensor((1 - is_best_adv)).to(self.device) * (curr_per.detach() < self.max_per)
+            # print("mask", mask)
+            # mask = mask.view([-1] + [1] * (dim - 1))
+            # best_adv = mask * adv_audios.detach() + (1 - mask) * best_adv
+            # print("best_adv", best_adv)
+            # mask = mask.reshape([-1]).detach().cpu().numpy()
+            # best_len = mask * curr_len + (1 - mask) * best_len
+            # log_str = "i:%d, curr_len/orig_len:%.2f, per:%.2f, adv_loss:%.2f, per_loss:%.2f" % (
+            #     it, float(best_len.sum()) / float(ori_len.sum()), curr_per.mean(), loss, per_loss
+            # )
+            
+            if is_best_adv:
+                best_adv = adv_audios.detach()
+                best_len = curr_len
+                
+            log_str = "i:%d, curr_len/orig_len:%.2f, adv_loss:%.2f" % (
+                it, float(best_len.sum()) / float(ori_len.sum()), loss,
             )
+            
             pbar.set_description(log_str)
         return True, [ori_audios, ori_len], [best_adv, best_len]
             

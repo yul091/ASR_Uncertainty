@@ -47,7 +47,7 @@ class BaseAttacker:
         
         self.softmax = nn.Softmax(dim=1)
         self.flatten = nn.Flatten()
-        self.bce_loss = nn.BCELoss(reduction='none')
+        self.bce_loss = nn.BCELoss()
         self.mse_Loss = nn.MSELoss(reduction='none')
         self.relu = nn.ReLU()
 
