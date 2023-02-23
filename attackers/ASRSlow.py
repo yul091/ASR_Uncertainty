@@ -191,8 +191,10 @@ class ASRSlowAttacker(BaseAttacker):
         # Mask special tokens probs
         logits[:, :, self.tokenizer.all_special_ids] = - float('inf')
         probs = F.softmax(logits.float(), dim=-1)  # B X T X C
-        ue = data_uncertainty(probs, self.uncertainty_args.data_ue_type)  # B
-        return ue
+        # ue = data_uncertainty(probs, self.uncertainty_args.data_ue_type)  # B
+        entropy = data_uncertainty(probs, 'entropy')  # B
+        vanilla = data_uncertainty(probs, 'vanilla')  # B
+        return entropy, vanilla
     
     def model_UE(self, input_features: torch.Tensor):
         logger.info("*******Perform stochastic inference*******")
@@ -206,7 +208,7 @@ class ASRSlowAttacker(BaseAttacker):
         with torch.no_grad():
             for _ in range(self.uncertainty_args.committee_size):
                 scores, seqs, pred_len = self.compute_score(input_features)
-                print("scores {}".format(scores))
+                # print("scores {}".format(scores))
                 logits = scores[0].unsqueeze(0)
                 # Mask special tokens probs
                 logits[:, :, self.tokenizer.all_special_ids] = - float('inf')
@@ -236,11 +238,22 @@ class ASRSlowAttacker(BaseAttacker):
     
     def run_attack(self, audio: np.ndarray, sample_rate: int = 16000):
         torch.autograd.set_detect_anomaly(True)
-
-        ori_len = self.get_ASR_len(audio, sample_rate) # list
         ori_feature = self.process(audio, sample_rate) # (1, L, E)
-        best_adv, best_len = ori_feature.clone(), ori_len
 
+        with torch.no_grad():
+            ori_scores, _, ori_len = self.compute_score(ori_feature)
+        
+        ori_entropy, ori_vanilla = self.data_UE(ori_scores)
+        # ori_mu = self.model_UE(ori_feature)
+        ue_dict = [{
+            "entropy": ori_entropy.item(), 
+            "vanilla": ori_vanilla.item(),
+            # "mu": ori_mu.item(), 
+            "feature": ori_feature.detach(),
+            "pred_len": ori_len,
+        }]
+
+        best_adv, best_len = ori_feature.clone(), ori_len
         noise, noise_rate = librosa.load(self.noise, sr=sample_rate)
         noi_feature = self.process(noise, noise_rate) # (1, L, E)
         
@@ -257,7 +270,6 @@ class ASRSlowAttacker(BaseAttacker):
         w.requires_grad = True
         optimizer = Adam([w], lr=self.lr)
         pbar = tqdm(range(self.max_iter))
-        ue_dict = []
         
         for it in pbar:
             # print("w ({}): {}".format(w.shape, w))
@@ -271,9 +283,15 @@ class ASRSlowAttacker(BaseAttacker):
             print("curr_pred: {}".format(curr_pred))
 
             # Calculate uncertainty
-            du = self.data_UE(scores)
-            mu = self.model_UE(adv_feature)
-            ue_dict.append({"du": du.item(), "mu": mu.item(), "feature": adv_feature.detach().cpu().numpy()})
+            entropy, vanilla = self.data_UE(scores)
+            # mu = self.model_UE(adv_feature)
+            ue_dict.append({
+                "entropy": entropy.item(),
+                "vanilla": vanilla.item(), 
+                # "mu": mu.item(), 
+                "feature": adv_feature.detach(),
+                "pred_len": curr_len,
+            })
             loss = sum(loss_list)
             # curr_per = self.compute_per(w, ori_audios)
             # print("curr_per", curr_per)
@@ -300,8 +318,8 @@ class ASRSlowAttacker(BaseAttacker):
             if is_best_adv:
                 best_adv = adv_feature.detach()
                 best_len = curr_len
-            log_str = "epoch:%d, adv_loss:%.2f, best_len: %.2f, curr_len:%d, dU:%.4f, mU:%.4f" % (
-                it, loss, float(sum(best_len)) / float(sum(ori_len)), sum(curr_len), du[0], mu[0]
+            log_str = "epoch:%d, adv_loss:%.2f, best_len: %.2f, curr_len:%d, entropy:%.4f, vanilla:%.4f" % (
+                it, loss, float(sum(best_len))/float(sum(ori_len)), sum(curr_len), entropy[0], vanilla[0],
             )
             pbar.set_description(log_str)
             

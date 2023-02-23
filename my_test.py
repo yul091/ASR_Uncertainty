@@ -6,8 +6,6 @@ from tqdm import tqdm
 import time
 import jiwer
 import torch
-import torchaudio
-from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoConfig,
     AutoTokenizer,
