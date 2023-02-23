@@ -12,7 +12,7 @@ if __name__ == "__main__":
     audio = "LibriSpeech/test-clean/1089/134686/1089-134686-0030.flac"
     model = "asr-crdnn-rnnlm-librispeech" # asr-crdnn-transformerlm-librispeech, asr-transformer-transformerlm-librispeech
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    max_iter = 100
+    max_iter = 3
     lr = 0.01
     att_norm = 'l2'
     

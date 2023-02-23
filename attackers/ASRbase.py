@@ -48,7 +48,7 @@ class BaseAttacker:
         self.softmax = nn.Softmax(dim=1)
         self.flatten = nn.Flatten()
         self.bce_loss = nn.BCELoss()
-        self.mse_Loss = nn.MSELoss(reduction='none')
+        self.mse_loss = nn.MSELoss(reduction='none')
         self.relu = nn.ReLU()
 
     @classmethod
@@ -70,7 +70,9 @@ class BaseAttacker:
         return pred_lens
 
     def get_predictions(self, audios: torch.Tensor, wav_lens: torch.Tensor):
+        print("audios.grad".format(audios.grad))
         encoder_out = self.model.encode_batch(audios, wav_lens) # B X T X D
+        print("encoder_out.grad".format(encoder_out.grad))
         pred_tokens, topk_scores, scores = self.model.mods.decoder(encoder_out, wav_lens)
         return pred_tokens, topk_scores, scores
 

@@ -46,7 +46,7 @@ class MyEncoderDecoderASR(EncoderDecoderASR):
         # Fake a batch:
         batch = waveform.unsqueeze(0)
         rel_length = torch.tensor([1.0])
-        predicted_words, predicted_tokens, predicted_log_probs = self.transcribe_batch(
+        predicted_words, predicted_tokens, scores = self.transcribe_batch(
             batch, rel_length
         )
         return predicted_words[0]
@@ -80,14 +80,41 @@ class MyEncoderDecoderASR(EncoderDecoderASR):
         with torch.no_grad():
             wav_lens = wav_lens.to(self.device)
             encoder_out = self.encode_batch(wavs, wav_lens)
-            predicted_tokens, scores, predicted_log_probs = self.mods.decoder(encoder_out, wav_lens)
+            predicted_tokens, topk_scores, scores = self.mods.decoder(encoder_out, wav_lens)
             predicted_words = [
                 self.tokenizer.decode_ids(token_seq)
                 for token_seq in predicted_tokens
             ]
-        return predicted_words, predicted_tokens, predicted_log_probs
+        return predicted_words, predicted_tokens, scores
     
-    
+    def encode_batch(self, wavs, wav_lens):
+        """Encodes the input audio into a sequence of hidden states
+
+        The waveforms should already be in the model's desired format.
+        You can call:
+        ``normalized = EncoderDecoderASR.normalizer(signal, sample_rate)``
+        to get a correctly converted signal in most cases.
+
+        Arguments
+        ---------
+        wavs : torch.tensor
+            Batch of waveforms [batch, time, channels] or [batch, time]
+            depending on the model.
+        wav_lens : torch.tensor
+            Lengths of the waveforms relative to the longest one in the
+            batch, tensor of shape [batch]. The longest one should have
+            relative length 1.0 and others len(waveform) / max_length.
+            Used for ignoring padding.
+
+        Returns
+        -------
+        torch.tensor
+            The encoded batch
+        """
+        print("Calling self-defined encode_batch() !")
+        wavs = wavs.float()
+        encoder_out = self.mods.encoder(wavs, wav_lens)
+        return encoder_out
 
     
     
