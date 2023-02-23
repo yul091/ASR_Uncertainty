@@ -5,6 +5,7 @@ import time
 import jiwer
 import torch
 import argparse
+import numpy as np
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
@@ -59,10 +60,9 @@ def main(args: argparse.Namespace):
     model_n = model_n_or_path.split("/")[-1]
     pred_file = "{}/{}-{}.adv.pred.txt".format(output_dir, data_n_or_path, model_n)
     log_file = "{}/{}-{}-{}.adv.log".format(output_dir, data_n_or_path, model_n, device)
-    f = open(pred_file, 'w')
 
-    if (not os.path.exists(pred_file)) or (not os.path.exists(f"{output_dir}/ue_dicts.pt")):
-        # Inference & Attack    
+    # Inference & Attack
+    if not os.path.exists(f"{output_dir}/ue_dicts.pt"):    
         all_ue_dicts = []
         for i, ins in tqdm(enumerate(ds)):
             audio = ins["audio"]['array'] # np.ndarray (seq_len, )
@@ -79,46 +79,62 @@ def main(args: argparse.Namespace):
             pred_len, best_seqs, _ = attacker.inference(best_adv)
             assert pred_len == best_len
             transcription = processor.batch_decode(best_seqs, skip_special_tokens=True)[0]
-            
             print("best_len: {}, output: {}".format(best_len, transcription))
-        all_ue_dicts.sort(key=lambda x: x['entropy']) # sort by data uncertainty
+            
         torch.save(all_ue_dicts, f"{output_dir}/ue_dicts.pt")
     else:
         all_ue_dicts = torch.load(f"{output_dir}/ue_dicts.pt")
 
     # Get statistics by iterating adversarial audios
-    res, latency = [], []
-    os.system(f"sudo tegrastats --logfile {log_file} &") # start logging energy
+    if not os.path.exists(f"{output_dir}/latency.pt"):
+        res, latency = [], []
+        os.system(f"sudo tegrastats --logfile {log_file} &") # start logging energy
 
-    # Inference
-    for i, ins in tqdm(enumerate(all_ue_dicts)):
-        time1 = time.time()
-        feature = ins["feature"] # torch.tensor (seq_len, )
-        pred_len, seqs, _ = attacker.inference(feature)
-        transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
-        time2 = time.time()
-        res.append(transcription.upper())
-        latency.append(time2 - time1)
+        # Inference
+        for i, ins in tqdm(enumerate(all_ue_dicts)):
+            time1 = time.time()
+            feature = ins["feature"] # torch.tensor (seq_len, )
+            pred_len, seqs, _ = attacker.inference(feature)
+            transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
+            time2 = time.time()
+            res.append(transcription.upper())
+            latency.append(time2 - time1)
 
-    os.system("sudo pkill tegrastats") # stop logging energy
-    torch.save(latency, f"{output_dir}/latency.pt")
-    
-    # Write to file
-    for output in res:
-        f.write("{}\n".format(output))
+        os.system("sudo pkill tegrastats") # stop logging energy
+        torch.save(latency, f"{output_dir}/latency.pt")
+
+        # Write to file
+        f = open(pred_file, 'w')
+        for output in res:
+            f.write("{}\n".format(output))
+    else:
+        latency = torch.load(f"{output_dir}/latency.pt")
+        res = [line.strip() for line in open(pred_file, 'r')]
+
     
     # Calculate WER
-    wer_score = jiwer.wer(ds["text"], res)
-    wer_scores = [jiwer.wer(ins["text"], res[i]) for i, ins in enumerate(all_ue_dicts)]
-    print("Inferencing finished!")
-    summary = "Total #seqs: {}, latency: {}s, avg latency: {:.4f}s, avg WER: {:.4f}".format(
-        len(ds), 
-        sum(latency),
-        sum(latency) / len(latency) if len(latency) > 0 else 0,
-        wer_score,
-    )
-    print(summary)
-    torch.save(wer_scores, f"{output_dir}/wer_scores.pt")
+    if not os.path.exists(f"{output_dir}/wer_scores.pt"):
+        wer_score = jiwer.wer(np.repeat(ds["text"], 1+max_iter).tolist(), res)
+        wer_scores = [jiwer.wer(ds["text"][i//(1+max_iter)], res[i]) for i in range(len(all_ue_dicts))]
+        print("Inferencing finished!")
+        summary = "Total #seqs: {}, latency: {}s, avg latency: {:.4f}s, avg WER: {:.4f}".format(
+            len(ds), 
+            sum(latency),
+            sum(latency) / len(latency) if len(latency) > 0 else 0,
+            wer_score,
+        )
+        print(summary)
+        torch.save(wer_scores, f"{output_dir}/wer_scores.pt")
+    else:
+        wer_scores = torch.load(f"{output_dir}/wer_scores.pt")
+        wer_score = jiwer.wer(np.repeat(ds["text"], 1+max_iter).tolist(), res)
+        summary = "Total #seqs: {}, latency: {}s, avg latency: {:.4f}s, avg WER: {:.4f}".format(
+            len(ds), 
+            sum(latency),
+            sum(latency) / len(latency) if len(latency) > 0 else 0,
+            wer_score,
+        )
+        print(summary)
     
 
 
