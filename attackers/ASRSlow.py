@@ -1,33 +1,51 @@
+import numpy as np
 from tqdm import tqdm
 from math import ceil
 import torch
+import librosa
 from torch.optim import Adam
+import torchaudio
 from torchaudio.utils import download_asset
 from typing import Optional, List
 from .ASRbase import BaseAttacker
 from utils import SAMPLE_NOISE
-from speechbrain.pretrained import EncoderDecoderASR
+from transformers import (
+    Speech2Text2Tokenizer,
+    Speech2Text2Processor,
+    Speech2TextForConditionalGeneration,
+)
 
 
 class ASRSlowAttacker(BaseAttacker):
     
     def __init__(
         self, 
-        device: torch.device = None, 
-        model: EncoderDecoderASR = None, 
+        device: torch.device = None,
+        tokenizer: Speech2Text2Tokenizer = None,
+        processor: Speech2Text2Processor = None,
+        model: Speech2TextForConditionalGeneration = None,
         lr: float = 1e-3,
-        max_len: int = 128, 
+        max_len: int = 128,
         max_per: int = None,
         max_iter: int = 5,
         att_norm: str = 'l2',
         noise_file: str = None,
     ):
-        super(ASRSlowAttacker, self).__init__(device, model, max_len, lr, max_per, max_iter, att_norm)
+        super(ASRSlowAttacker, self).__init__(
+            device=device, 
+            tokenizer=tokenizer, 
+            processor=processor, 
+            model=model, 
+            max_len=max_len, 
+            lr=lr, 
+            max_per=max_per, 
+            max_iter=max_iter, 
+            att_norm=att_norm,
+        )
         if noise_file is not None:
-            noise = download_asset(noise_file)
+            self.noise = download_asset(noise_file)
         else:
-            noise = download_asset(SAMPLE_NOISE)
-        self.noise = self.model.load_audio(noise).unsqueeze(0).to(self.device)
+            self.noise = download_asset(SAMPLE_NOISE)
     
     def add_noise(
         self,
@@ -62,44 +80,73 @@ class ASRSlowAttacker(BaseAttacker):
         scaled_noise = scale.unsqueeze(-1) * noise  # (*, 1) * (*, L) = (*, L)
         return waveform + scaled_noise  # (*, L)
     
-    def compute_per(self, adv_audios, ori_audios):
+    def compute_per(
+            self, 
+            adv_audios: torch.Tensor, 
+            ori_audios: torch.Tensor,
+        ):
         if self.att_norm == 'l2':
             curr_dist = self.mse_loss(
                 self.flatten(adv_audios),
                 self.flatten(ori_audios)
-            ).sum(dim=1)
+            )
         elif self.att_norm == 'linf':
             curr_dist = (self.flatten(adv_audios) - self.flatten(ori_audios)).max(1)[0]
         else:
             raise NotImplementedError
-        return curr_dist
+        return curr_dist  
     
-    def handle_score(
-        self, 
-        out_scores: List[torch.Tensor], 
-        pred_lens: List[int], 
-        audios: torch.Tensor,
-    ):
-        # print("out_scores[0].grad (before handle): {}".format(out_scores[0].grad))
-        batch_size = audios.shape[0] # B
-        index_list = [i * self.beam_size for i in range(batch_size + 1)]
+
+    def compute_batch_score(
+            self, 
+            audios: List[np.ndarray], 
+            sample_rate: int,
+        ):
+        batch_size = len(audios) # batch size
+        index_list = [i * self.num_beams for i in range(batch_size + 1)]
+        pred_len, seqs, out_scores = self.get_predictions(audios, sample_rate)
+        print("pred_len {}, seqs {}, out_scores {}".format(pred_len, seqs, [s.shape for s in out_scores]))
         scores = [[] for _ in range(batch_size)]
-        
         for out_s in out_scores:
             for i in range(batch_size):
                 current_index = index_list[i]
                 scores[i].append(out_s[current_index: current_index + 1])
         scores = [torch.cat(s) for s in scores]
-        scores = [s[:pred_lens[i]] for i, s in enumerate(scores)]
-        # print("scores[0].grad (after handle): {}".format(scores[0].grad))
-        return scores
+        scores = [s[:pred_len[i]] for i, s in enumerate(scores)]
+        return scores, seqs, pred_len
+    
+    def compute_score(
+            self, 
+            audios: List[np.ndarray], 
+            sample_rate: int, 
+            b_size: int = None
+        ):
+        total_size = len(audios) # batch size
+        if b_size is None:
+            b_size = total_size
+
+        if b_size < total_size:
+            scores, seqs, pred_len = [], [], []
+            for st in range(0, total_size, b_size):
+                end = min(st + b_size, total_size)
+                score, seq, p_len = self.compute_batch_score(audios[st: end, :], sample_rate)
+                pred_len.extend(p_len)
+                seqs.extend(seq)
+                scores.extend(score)
+        else:
+            scores, seqs, pred_len = self.compute_batch_score(audios, sample_rate)
+        return scores, seqs, pred_len
     
     
-    def leave_eos_target_loss(self, scores: List[torch.Tensor], seqs: list, pred_lens: list):
+    def leave_eos_target_loss(
+            self, 
+            scores: List[torch.Tensor], 
+            seqs: list, 
+            pred_lens: list,
+        ):
         loss = []
         for i, s in enumerate(scores): # s: T X V
             # print("s {}, seqs[i] {}, pred_lens[i] {}".format(s.shape, seqs[i], pred_lens[i]))
-            # print("s.grad: {}".format(s.grad))
             if pred_lens[i] == 0:
                 loss.append(torch.tensor(0.0, requires_grad=True).to(self.device))
             else:
@@ -107,54 +154,72 @@ class ASRSlowAttacker(BaseAttacker):
                 s[:, self.pad_token_id] = 1e-12
                 softmax_v = self.softmax(s)
                 eos_p = softmax_v[:pred_lens[i], self.eos_token_id]
-                target_p = torch.stack([softmax_v[idx, v] for idx, v in enumerate(seqs[i])])
+                target_p = torch.stack([softmax_v[idx, v] for idx, v in enumerate(seqs[i][1:])])
                 target_p = target_p[:pred_lens[i]]
                 pred = eos_p + target_p
                 pred[-1] = pred[-1] / 2
-                ind_loss = self.bce_loss(pred, torch.zeros_like(pred))
-                loss.append(ind_loss)
+                loss.append(self.bce_loss(pred, torch.zeros_like(pred)))
         return loss
     
-    
-    def compute_loss(self, audios: torch.Tensor, wav_lens: torch.Tensor):
-        seqs, _, scores = self.get_predictions(audios, wav_lens)
-        print("scores[0].is_leaf (after pred): {}".format(scores[0].is_leaf))
-        
-        pred_lens = [len(seq) for seq in seqs]
-        scores = self.handle_score(scores, pred_lens, audios)
-        loss_list = self.leave_eos_target_loss(scores, seqs, pred_lens)
+    def compute_loss(
+            self, 
+            audios: List[np.ndarray], 
+            sample_rate: int,
+        ):
+        scores, seqs, pred_len = self.compute_score(audios, sample_rate)
+        loss_list = self.leave_eos_target_loss(scores, seqs, pred_len)
         # loss = self.bce_loss(scores, torch.zeros_like(scores))
-        return sum(loss_list)
+        return loss_list
     
-    def run_attack(self, audios: torch.Tensor, wav_lens: torch.Tensor):
+    def run_attack(
+            self, 
+            audios: List[np.ndarray], 
+            sample_rate: int,
+        ):
+        ori_len = self.get_ASR_len(audios, sample_rate)
+
         torch.autograd.set_detect_anomaly(True)
+        if not isinstance(audios, torch.Tensor):
+            audios = torch.tensor(audios).to(self.device)
+        if len(audios.shape) == 1:
+            audios = audios.unsqueeze(0)
         dim = len(audios.shape)
-        ori_audios = audios.clone()
-        ori_len = self.get_ASR_len(audios, wav_lens)
-        best_adv = audios.clone()
+        
+        ori_audios, best_adv = audios.clone(), audios.clone()
         best_len = ori_len
+
+        noise, noise_rate = librosa.load(self.noise, sr=sample_rate)
+        noise = torch.tensor(noise).to(self.device)
+        if len(noise.shape) == 1:
+            noise = noise.unsqueeze(0)
+
+        print("audios ({}): {}".format(audios.shape, audios))
+        print("noise ({}): {}".format(noise.shape, noise))
         
         # Handle noise
-        if self.noise.shape[1] < audios.shape[1]:
-            K = ceil(audios.shape[1] / self.noise.shape[1])
-            w: torch.Tensor = self.noise.repeat(1, K)[:, :audios.shape[1]]
+        if noise.shape[1] < audios.shape[1]:
+            K = ceil(audios.shape[1] / noise.shape[1])
+            w: torch.Tensor = noise.repeat(1, K)[:, :audios.shape[1]]
         else:
-            w: torch.Tensor = self.noise[:, :audios.shape[1]]
+            w: torch.Tensor = noise[:, :audios.shape[1]]
         
         w = w.detach()
-        # snr_dbs = torch.tensor([20, 10, 3]).to(self.device)
+        snr_dbs = torch.tensor([20, 10, 3]).to(self.device)
         # w = self.inverse_tanh_space(audios).detach()
         w.requires_grad = True
         optimizer = Adam([w], lr=self.lr)
         pbar = tqdm(range(self.max_iter))
         
         for it in pbar:
-            print("w: {}".format(w))
+            print("w ({}): {}".format(w.shape, w))
             # print("w.grad: {}".format(w.grad))
             # adv_audios = self.add_noise(ori_audios, w, snr_dbs)[1:2]
+            adv_audios = ori_audios + w
+            print("adv_audios ({}): {}".format(adv_audios.shape, adv_audios))
             # adv_audios = self.tanh_space(w)
             # adv_audios = w
-            loss = self.compute_loss(w, wav_lens)
+            loss_list = self.compute_loss([adv_audios.squeeze(0).detach().cpu().numpy()], sample_rate)
+            loss = sum(loss_list)
             # loss = self.mse_loss(w, torch.randn_like(w)).sum()
             print("loss: {}".format(loss))
             # curr_per = self.compute_per(w, ori_audios)
@@ -188,7 +253,7 @@ class ASRSlowAttacker(BaseAttacker):
             # )
             # pbar.set_description(log_str)
             
-        return True, [ori_audios, ori_len], [best_adv, best_len]
+        return [ori_audios, ori_len], [best_adv.squeeze(0).detach().cpu().numpy(), best_len]
             
             
         

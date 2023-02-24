@@ -6,90 +6,82 @@ import argparse
 # from speechbrain.pretrained import EncoderASR
 from transformers import (
     AutoConfig,
+    AutoTokenizer,
     AutoFeatureExtractor,
     AutoProcessor,
-    Speech2TextProcessor, 
-    AutoModelForCTC,
-    AutoModelForSpeechSeq2Seq,
-    SpeechEncoderDecoderModel, # wav2vec2
-    Speech2TextForConditionalGeneration,
-    AutoModelForCTC,
-    HubertForCTC,
-    SEWForCTC,
-    SEWDForCTC,
+    AutoModelForSpeechSeq2Seq, # s2t, wav2vec2
 )
 from datasets import load_dataset
 from attackers.ASRSlow import ASRSlowAttacker
 
 
 def main(args: argparse.Namespace):
-    max_iter = args.max_iter
     lr = args.lr
+    max_iter = args.max_iter
+    max_len = args.max_len
     att_norm = args.att_norm
     model_n_or_path = args.model
     dataset_n_or_path = args.dataset
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    tokenizer = AutoTokenizer.from_pretrained(f"facebook/{model_n_or_path}")
     model = AutoModelForSpeechSeq2Seq.from_pretrained(f"facebook/{model_n_or_path}")
     processor = AutoProcessor.from_pretrained(f"facebook/{model_n_or_path}")
     ds = load_dataset(f"hf-internal-testing/{dataset_n_or_path}", "clean", split="validation")
     print(model)
     print(ds)
 
-    print("input: {}".format(ds[0]["audio"]["array"].shape))
-    inputs = processor(
-        ds[0]["audio"]["array"], 
-        sampling_rate=ds[0]["audio"]["sampling_rate"], 
-        return_tensors="pt",
-    ) # input_features, attention_mask
-    input_features = inputs.input_features
-    print("input feature: {}".format(input_features.shape))
+    audio = ds[0]["audio"]["array"]
+    sample_rate = ds[0]["audio"]["sampling_rate"]
+    print("input ({}): {}, sample rate: {}".format(type(audio), audio.shape, sample_rate))
+
+    # Inference
+    # inputs = processor(
+    #     audio,
+    #     sampling_rate=sample_rate, 
+    #     return_tensors="pt",
+    # ) # input_features, attention_mask
+    # input_features = inputs.input_features
+    # print("input feature: {}".format(input_features.shape))
+    # input_features = input_features.to(device)
     
-    model = model.to(device)
-    input_features = input_features.to(device)
-    
-    generated_ids = model.generate(
-        inputs=input_features,
-        max_length=128,
-    )
-    print("generated_ids ({}): {}".format(generated_ids.shape, generated_ids))
-    transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    print("output: {}".format(transcription))
+    # generated_ids = model.generate(
+    #     inputs=input_features,
+    #     max_length=128,
+    # )
+    # print("generated_ids ({}): {}".format(generated_ids.shape, generated_ids))
+    # transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    # print("output: {}".format(transcription))
     
         
-    # # Define attacker
-    # attacker = ASRSlowAttacker(
-    #     device=device,
-    #     model=model, 
-    #     lr=lr,
-    #     att_norm=att_norm,
-    #     max_iter=max_iter,
-    # )
+    # Define attacker
+    attacker = ASRSlowAttacker(
+        device=device,
+        tokenizer=tokenizer,
+        processor=processor,
+        model=model, 
+        lr=lr,
+        att_norm=att_norm,
+        max_iter=max_iter,
+        max_len=max_len,
+    )
+
+    # Inference
+    pred_len, seqs, _ = attacker.get_predictions(audio, sample_rate)
+    print("generated_ids ({}): {}".format(pred_len, seqs))
+    transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
+    print("output: {}".format(transcription))
     
-    # # asr_model.transcribe_file(audio_1)
-    # waveform = asr_model.load_audio(audio).unsqueeze(0).to(device)
-    # wav_lens = torch.tensor([1.0]).to(device)
-    # pred_words, pred_tokens, scores = asr_model.transcribe_batch(waveform, wav_lens)
-    # encoder_out = asr_model.encode_batch(waveform, wav_lens) # B X T X D
-    # print("encoder outputs: ", encoder_out.shape)
-    # predicted_tokens, topk_scores, scores = asr_model.mods.decoder(encoder_out, wav_lens)
-    # print(predicted_tokens)
-    # print("topk_scores ({}): {}".format(topk_scores.shape, topk_scores))
-    # print("scores ({})".format([score.shape for score in scores]))
-    # predicted_words = [
-    #     asr_model.tokenizer.decode_ids(token_seq)
-    #     for token_seq in predicted_tokens
-    # ]
-    # print("orig outputs: ", pred_words)
-    
-    # # Attack
-    # Success, [ori_audios, ori_len], [best_adv, best_len] = attacker.run_attack(
-    #     audios=waveform,
-    #     wav_lens=wav_lens,
-    # )
-    # print("best_len: {}, best_adv: {}".format(best_len, best_adv))
-    # pred_words, pred_tokens, scores = model.transcribe_batch(best_adv, wav_lens)
-    # print(pred_words)
+    # Attack
+    [ori_audios, ori_len], [best_adv, best_len] = attacker.run_attack(
+        audios=audio,
+        sample_rate=sample_rate,
+    )
+    print("best_len: {}, best_adv: {}".format(best_len, best_adv))
+    pred_len, seqs, _ = attacker.get_predictions(best_adv, sample_rate)
+    print("generated_ids ({}): {}".format(pred_len, seqs))
+    transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
+    print("output: {}".format(transcription))
 
 
 if __name__ == "__main__":
@@ -114,6 +106,10 @@ if __name__ == "__main__":
                         default='l2',
                         choices=['l2', 'linf'],
                         help="Norm to use for the attack")
+    parser.add_argument("--max_len", type=int,
+                        default=128,
+                        help="Maximum length of sequence to generate")
+    
     
     args = parser.parse_args()
     main(args)
