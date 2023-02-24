@@ -58,7 +58,6 @@ class ASRSlowAttacker(BaseAttacker):
         energy_noise = torch.linalg.vector_norm(masked_noise, ord=2, dim=-1) ** 2  # (*,)
         original_snr_db = 10 * (torch.log10(energy_signal) - torch.log10(energy_noise))
         scale = 10 ** ((original_snr_db - snr) / 20.0)  # (*,)
-
         # scale noise
         scaled_noise = scale.unsqueeze(-1) * noise  # (*, 1) * (*, L) = (*, L)
         return waveform + scaled_noise  # (*, L)
@@ -75,9 +74,13 @@ class ASRSlowAttacker(BaseAttacker):
             raise NotImplementedError
         return curr_dist
     
-    def handle_score(self, out_scores: List[torch.Tensor], pred_lens: List[int], audios: torch.Tensor):
+    def handle_score(
+        self, 
+        out_scores: List[torch.Tensor], 
+        pred_lens: List[int], 
+        audios: torch.Tensor,
+    ):
         # print("out_scores[0].grad (before handle): {}".format(out_scores[0].grad))
-        
         batch_size = audios.shape[0] # B
         index_list = [i * self.beam_size for i in range(batch_size + 1)]
         scores = [[] for _ in range(batch_size)]
@@ -100,6 +103,7 @@ class ASRSlowAttacker(BaseAttacker):
             if pred_lens[i] == 0:
                 loss.append(torch.tensor(0.0, requires_grad=True).to(self.device))
             else:
+                print("s.shape: {}, self.pad_token_id: {}, self.eos_token_id: {}".format(s.shape, self.pad_token_id, self.eos_token_id))
                 s[:, self.pad_token_id] = 1e-12
                 softmax_v = self.softmax(s)
                 eos_p = softmax_v[:pred_lens[i], self.eos_token_id]
@@ -114,7 +118,7 @@ class ASRSlowAttacker(BaseAttacker):
     
     def compute_loss(self, audios: torch.Tensor, wav_lens: torch.Tensor):
         seqs, _, scores = self.get_predictions(audios, wav_lens)
-        # print("scores[0].grad (after pred): {}".format(scores[0].grad))
+        print("scores[0].is_leaf (after pred): {}".format(scores[0].is_leaf))
         
         pred_lens = [len(seq) for seq in seqs]
         scores = self.handle_score(scores, pred_lens, audios)
@@ -123,6 +127,7 @@ class ASRSlowAttacker(BaseAttacker):
         return sum(loss_list)
     
     def run_attack(self, audios: torch.Tensor, wav_lens: torch.Tensor):
+        torch.autograd.set_detect_anomaly(True)
         dim = len(audios.shape)
         ori_audios = audios.clone()
         ori_len = self.get_ASR_len(audios, wav_lens)

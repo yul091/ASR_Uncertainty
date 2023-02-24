@@ -1,5 +1,5 @@
 import torch
-from speechbrain.pretrained import EncoderDecoderASR
+from speechbrain.pretrained import EncoderDecoderASR, EncoderASR
 
 
 class MyEncoderDecoderASR(EncoderDecoderASR):
@@ -87,34 +87,34 @@ class MyEncoderDecoderASR(EncoderDecoderASR):
             ]
         return predicted_words, predicted_tokens, scores
     
-    def encode_batch(self, wavs, wav_lens):
-        """Encodes the input audio into a sequence of hidden states
+    # def encode_batch(self, wavs, wav_lens):
+    #     """Encodes the input audio into a sequence of hidden states
 
-        The waveforms should already be in the model's desired format.
-        You can call:
-        ``normalized = EncoderDecoderASR.normalizer(signal, sample_rate)``
-        to get a correctly converted signal in most cases.
+    #     The waveforms should already be in the model's desired format.
+    #     You can call:
+    #     ``normalized = EncoderDecoderASR.normalizer(signal, sample_rate)``
+    #     to get a correctly converted signal in most cases.
 
-        Arguments
-        ---------
-        wavs : torch.tensor
-            Batch of waveforms [batch, time, channels] or [batch, time]
-            depending on the model.
-        wav_lens : torch.tensor
-            Lengths of the waveforms relative to the longest one in the
-            batch, tensor of shape [batch]. The longest one should have
-            relative length 1.0 and others len(waveform) / max_length.
-            Used for ignoring padding.
+    #     Arguments
+    #     ---------
+    #     wavs : torch.tensor
+    #         Batch of waveforms [batch, time, channels] or [batch, time]
+    #         depending on the model.
+    #     wav_lens : torch.tensor
+    #         Lengths of the waveforms relative to the longest one in the
+    #         batch, tensor of shape [batch]. The longest one should have
+    #         relative length 1.0 and others len(waveform) / max_length.
+    #         Used for ignoring padding.
 
-        Returns
-        -------
-        torch.tensor
-            The encoded batch
-        """
-        print("Calling self-defined encode_batch() !")
-        wavs = wavs.float()
-        encoder_out = self.mods.encoder(wavs, wav_lens)
-        return encoder_out
+    #     Returns
+    #     -------
+    #     torch.tensor
+    #         The encoded batch
+    #     """
+    #     print("Calling self-defined encode_batch() !")
+    #     wavs = wavs.float()
+    #     encoder_out = self.mods.encoder(wavs, wav_lens)
+    #     return encoder_out
 
     
     

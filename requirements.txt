@@ -1,4 +1,4 @@
-speechbrain
-evaluate
+transformers==4.24.0
+evaluate==0.4.0
 jiwer
 alpaca-ml
