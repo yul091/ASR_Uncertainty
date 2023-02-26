@@ -9,7 +9,7 @@ from transformers import (
     Speech2Text2Processor,
     Speech2TextForConditionalGeneration,
 )
-from typing import Optional, List
+from typing import Optional, List, Union
 from DialogueAPI import dialogue
 
 class BaseAttacker:
@@ -48,10 +48,9 @@ class BaseAttacker:
         else:
             self.model = model.to(self.device)
             
-        self.bos_token_id = self.tokenizer.bos_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self.unk_token_id = self.tokenizer.unk_token_id
+        self.bos_token_id = self.model.config.bos_token_id
+        self.eos_token_id = self.model.config.eos_token_id
+        self.pad_token_id = self.model.config.pad_token_id
         self.lr = lr
         self.max_len = max_len
         
@@ -95,7 +94,11 @@ class BaseAttacker:
     def remove_pad(self, s: torch.Tensor):
         return s[torch.nonzero(s != self.pad_token_id)].squeeze(1)
 
-    def get_predictions(self, audios: List[np.ndarray], sample_rate: int):
+    def process(
+            self, 
+            audios: Union[List[np.ndarray], np.ndarray], 
+            sample_rate: int
+        ):
         inputs = self.processor(
             audios,
             sampling_rate=sample_rate, 
@@ -105,6 +108,9 @@ class BaseAttacker:
         # input_features, attention_mask
         input_features = inputs.input_features # B x T x F
         input_features = input_features.to(self.device)
+        return input_features
+
+    def inference(self, input_features: torch.Tensor): 
         outputs = dialogue(
             self.model,
             inputs=input_features,
@@ -116,21 +122,50 @@ class BaseAttacker:
         )
         # sequences, sequences_scores, scores, beam_indices
         seqs = outputs['sequences'].detach()
+        # print("seqs (before remove pad) ({}): {}".format([seq.shape for seq in seqs], seqs))
         seqs = [self.remove_pad(seq) for seq in seqs]
+        # print("seqs (after remove pad) ({}): {}".format([seq.shape for seq in seqs], seqs))
         out_scores = outputs['scores']
         pred_len = [self.compute_seq_len(seq) for seq in seqs]
+        # print("pred_len: {}".format(pred_len))
+        return pred_len, seqs, out_scores
+
+    def get_predictions(self, audios: List[np.ndarray], sample_rate: int):
+        input_features = self.process(audios, sample_rate)
+        pred_len, seqs, out_scores = self.inference(input_features)
         return pred_len, seqs, out_scores
     
-    def get_ASR_string_len(self, audios: List[np.ndarray], sample_rate: int):
-        pred_len, seqs, _ = self.get_predictions(audios, sample_rate)
+    def get_ASR_string_len(
+            self, 
+            audios: Union[List[np.ndarray], torch.Tensor], 
+            sample_rate: int = 16000,
+        ):
+        if isinstance(audios, torch.Tensor):
+            pred_len, seqs, _ = self.inference(audios)
+        else:
+            pred_len, seqs, _ = self.get_predictions(audios, sample_rate)
         return seqs[0], pred_len[0]
 
-    def get_ASR_len(self, audios: List[np.ndarray], sample_rate: int):
-        pred_len, _, _ = self.get_predictions(audios, sample_rate)
+    def get_ASR_len(
+            self, 
+            audios: Union[List[np.ndarray], torch.Tensor], 
+            sample_rate: int = 16000,
+        ):
+        if isinstance(audios, torch.Tensor):
+            pred_len, _, _ = self.inference(audios)
+        else:
+            pred_len, _, _ = self.get_predictions(audios, sample_rate)
         return pred_len
 
-    def get_ASR_strings(self, audios: List[np.ndarray], sample_rate: int):
-        pred_len, seqs, _ = self.get_predictions(audios, sample_rate)
+    def get_ASR_strings(
+            self, 
+            audios: Union[List[np.ndarray], torch.Tensor], 
+            sample_rate: int = 16000,
+        ):
+        if isinstance(audios, torch.Tensor):
+            pred_len, seqs, _ = self.inference(audios)
+        else:
+            pred_len, seqs, _ = self.get_predictions(audios, sample_rate)
         out_res = [self.tokenizer.decode(seq, skip_special_tokens=True) for seq in seqs]
         return out_res, pred_len
     

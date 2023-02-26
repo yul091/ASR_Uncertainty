@@ -21,38 +21,19 @@ def main(args: argparse.Namespace):
     max_len = args.max_len
     att_norm = args.att_norm
     model_n_or_path = args.model
-    dataset_n_or_path = args.dataset
+    data_n_or_path = args.dataset
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     tokenizer = AutoTokenizer.from_pretrained(f"facebook/{model_n_or_path}")
     model = AutoModelForSpeechSeq2Seq.from_pretrained(f"facebook/{model_n_or_path}")
     processor = AutoProcessor.from_pretrained(f"facebook/{model_n_or_path}")
-    ds = load_dataset(f"hf-internal-testing/{dataset_n_or_path}", "clean", split="validation")
+    ds = load_dataset(f"hf-internal-testing/{data_n_or_path}", "clean", split="validation")
     print(model)
     print(ds)
 
     audio = ds[0]["audio"]["array"]
     sample_rate = ds[0]["audio"]["sampling_rate"]
     print("input ({}): {}, sample rate: {}".format(type(audio), audio.shape, sample_rate))
-
-    # Inference
-    # inputs = processor(
-    #     audio,
-    #     sampling_rate=sample_rate, 
-    #     return_tensors="pt",
-    # ) # input_features, attention_mask
-    # input_features = inputs.input_features
-    # print("input feature: {}".format(input_features.shape))
-    # input_features = input_features.to(device)
-    
-    # generated_ids = model.generate(
-    #     inputs=input_features,
-    #     max_length=128,
-    # )
-    # print("generated_ids ({}): {}".format(generated_ids.shape, generated_ids))
-    # transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    # print("output: {}".format(transcription))
-    
         
     # Define attacker
     attacker = ASRSlowAttacker(
@@ -68,20 +49,18 @@ def main(args: argparse.Namespace):
 
     # Inference
     pred_len, seqs, _ = attacker.get_predictions(audio, sample_rate)
-    print("generated_ids ({}): {}".format(pred_len, seqs))
     transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
-    print("output: {}".format(transcription))
+    print("output ({}): {}".format(pred_len, transcription))
     
     # Attack
-    [ori_audios, ori_len], [best_adv, best_len] = attacker.run_attack(
-        audios=audio,
+    best_adv, best_len = attacker.run_attack(
+        audio=audio,
         sample_rate=sample_rate,
     )
-    print("best_len: {}, best_adv: {}".format(best_len, best_adv))
-    pred_len, seqs, _ = attacker.get_predictions(best_adv, sample_rate)
-    print("generated_ids ({}): {}".format(pred_len, seqs))
-    transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
-    print("output: {}".format(transcription))
+    pred_len, best_seqs, _ = attacker.inference(best_adv)
+    assert pred_len == best_len
+    transcription = processor.batch_decode(best_seqs, skip_special_tokens=True)[0]
+    print("best_len: {}, output: {}".format(best_len, transcription))
 
 
 if __name__ == "__main__":
@@ -100,7 +79,7 @@ if __name__ == "__main__":
                         default=5,
                         help="Maximum number of iterations")
     parser.add_argument("--lr", type=float,
-                        default=0.01,
+                        default=0.001,
                         help="Learning rate")
     parser.add_argument("--att_norm", type=str,
                         default='l2',
