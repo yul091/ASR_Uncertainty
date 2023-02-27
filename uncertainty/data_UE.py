@@ -1,7 +1,8 @@
 import torch
+# from typing import List
 
 
-def data_uncertainty(preds, ue="vanilla"):
+def data_uncertainty(preds: torch.Tensor, ue: str = "vanilla"):
     """
     Input:
         preds: B X T X C
@@ -9,10 +10,11 @@ def data_uncertainty(preds, ue="vanilla"):
         scores: B
     """
     if ue == "vanilla":
-        token_score = 1 - torch.max(preds, dim=-1)[0]  # B X T
+        token_score, indices = torch.max(preds, dim=-1)
+        ue = 1 - token_score # B X T
     elif ue == "entropy":
-        token_score = torch.sum(-preds * torch.log(torch.clip(preds, 1e-8, 1)), axis=-1)  # B X T
+        ue = torch.sum(-preds * torch.log(torch.clip(preds, 1e-8, 1)), axis=-1)  # B X T
     else:
         raise ValueError("Unknown uncertainty estimation method.")
 
-    return torch.mean(token_score, dim=-1)  # B
+    return torch.mean(ue, dim=-1)  # B

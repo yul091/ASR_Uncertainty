@@ -12,7 +12,7 @@ from transformers import (
     AutoModelForSpeechSeq2Seq, # s2t, wav2vec2
 )
 from datasets import load_dataset
-from attackers.ASRSlow import ASRSlowAttacker
+from attackers import ASRSlowAttacker
 
 
 def main(args: argparse.Namespace):
@@ -22,6 +22,9 @@ def main(args: argparse.Namespace):
     att_norm = args.att_norm
     model_n_or_path = args.model
     data_n_or_path = args.dataset
+    committee_size = args.committee_size
+    data_uncertainty = args.data_uncertainty
+    model_uncertainty = args.model_uncertainty
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     tokenizer = AutoTokenizer.from_pretrained(f"facebook/{model_n_or_path}")
@@ -45,6 +48,9 @@ def main(args: argparse.Namespace):
         att_norm=att_norm,
         max_iter=max_iter,
         max_len=max_len,
+        committee_size=committee_size,
+        data_uncertainty=data_uncertainty,
+        model_uncertainty=model_uncertainty,
     )
 
     # Inference
@@ -88,7 +94,17 @@ if __name__ == "__main__":
     parser.add_argument("--max_len", type=int,
                         default=128,
                         help="Maximum length of sequence to generate")
-    
+    parser.add_argument("--committee_size", type=int,
+                        default=10,
+                        help="Number of stochastic inferences")
+    parser.add_argument("--data_uncertainty", '-du', type=str,
+                        default='vanilla',
+                        choices=['vanilla', 'entropy'],
+                        help="Data uncertainty estimation method")
+    parser.add_argument("--model_uncertainty", '-mu', type=str,
+                        default='prob_variance',
+                        choices=['prob_variance', 'bald', 'sampled_max_prob'],
+                        help="Model uncertainty estimation method")
     
     args = parser.parse_args()
     main(args)

@@ -3,14 +3,14 @@ from collections import Counter
 from typing import Iterable, Union
 
 
-def entropy(x):
+def entropy(x: np.ndarray):
     return np.sum(-x * np.log(np.clip(x, 1e-8, 1)), axis=-1)
 
-def mean_entropy(sampled_probabilities):
+def mean_entropy(sampled_probabilities: np.ndarray):
     return entropy(np.mean(sampled_probabilities, axis=1))
 
 
-def sampled_max_prob(sampled_probabilities):
+def sampled_max_prob(sampled_probabilities: np.ndarray):
     """Computes the max probability for a set of samples.
     Args:
         sampled_probabilities: A numpy array of K forward passes, where each pass contains an array of batch size B X length T X class C.
@@ -27,11 +27,10 @@ def sampled_max_prob(sampled_probabilities):
 
     # Compute the mean probability over the K forward passes.
     max_prob = np.max(np.mean(sampled_probabilities, axis=0), axis=-1)  # K X B X T X C -> B X T X C -> B X T
-
     return np.mean(1 - max_prob, axis=-1)  # B
 
 
-def probability_variance(sampled_probabilities):
+def probability_variance(sampled_probabilities: np.ndarray):
     """Computes the probability variance for a set of samples.
     Args:
         sampled_probabilities: A numpy array of K forward passes, where each pass contains an array of batch size B X length T X class C.
@@ -51,11 +50,10 @@ def probability_variance(sampled_probabilities):
     )  # K X B X T X C -> 1 X B X T X C
     variance = np.mean(np.power(sampled_probabilities - mean_probabilities, 2), axis=0)  # B X T X C
     variance = np.mean(np.sum(variance, axis=-1), axis=-1)  # B X T -> B
-
     return variance  # B
 
 
-def bald(sampled_probabilities):
+def bald(sampled_probabilities: np.ndarray):
     """Computes the BALD score for a set of samples.
     Args:
         sampled_probabilities: A numpy array of K forward passes, where each pass contains an array of batch size B X length T X class C.
@@ -68,7 +66,6 @@ def bald(sampled_probabilities):
     # Compute the mean probability over the K forward passes.
     predictive_entropy = entropy(np.mean(sampled_probabilities, axis=0))  # K X B X T X C -> B X T X C -> B X T
     expected_entropy = np.mean(entropy(sampled_probabilities), axis=0)  # K X B X T X C -> K X B X T -> B X T
-
     return np.mean(predictive_entropy - expected_entropy, axis=-1)  # B
 
 

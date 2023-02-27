@@ -126,6 +126,7 @@ class BaseAttacker:
         seqs = [self.remove_pad(seq) for seq in seqs]
         # print("seqs (after remove pad) ({}): {}".format([seq.shape for seq in seqs], seqs))
         out_scores = outputs['scores']
+        # print("seqs scores: {}".format(outputs['sequences_scores']))
         pred_len = [self.compute_seq_len(seq) for seq in seqs]
         # print("pred_len: {}".format(pred_len))
         return pred_len, seqs, out_scores

@@ -1,19 +1,33 @@
+import sys
+sys.path.append("..") # Adds higher directory to python modules path.
 import numpy as np
 from tqdm import tqdm
 from math import ceil
+import logging
+from argparse import Namespace
 import torch
+import torch.nn.functional as F
 import librosa
 from torch.optim import Adam
 import torchaudio
 from torchaudio.utils import download_asset
 from typing import Optional, List, Union
 from .ASRbase import BaseAttacker
+from uncertainty import (
+    data_uncertainty,
+    activate_mc_dropout,
+    convert_dropouts,
+    bald,
+    probability_variance,
+    sampled_max_prob,
+)
 from utils import SAMPLE_NOISE
 from transformers import (
     Speech2Text2Tokenizer,
     Speech2Text2Processor,
     Speech2TextForConditionalGeneration,
 )
+logger = logging.getLogger(__name__)
 
 
 class ASRSlowAttacker(BaseAttacker):
@@ -30,6 +44,9 @@ class ASRSlowAttacker(BaseAttacker):
         max_iter: int = 5,
         att_norm: str = 'l2',
         noise_file: str = None,
+        committee_size: int = 10,
+        data_uncertainty: str = 'vanilla',
+        model_uncertainty: str = 'prob_variance',
     ):
         super(ASRSlowAttacker, self).__init__(
             device=device, 
@@ -46,6 +63,27 @@ class ASRSlowAttacker(BaseAttacker):
             self.noise = download_asset(noise_file)
         else:
             self.noise = download_asset(SAMPLE_NOISE)
+
+        self.model_uncertainty = model_uncertainty
+        self.data_uncertainty = data_uncertainty
+        self.committee_size = committee_size
+        dropout_args = Namespace(
+            max_n=100,
+            max_frac=0.4,
+            mask_name="mc",
+            dry_run_dataset="train",
+        )
+        self.uncertainty_args = Namespace(
+            dropout_type="MC",
+            data_ue_type=self.data_uncertainty,
+            inference_prob=0.1,
+            committee_size=self.committee_size,  # number of forward passes
+            dropout_subs="last",
+            eval_bs=1000,
+            use_cache=True,
+            eval_passes=False,
+            dropout=dropout_args,
+        )
     
     def add_noise(
         self,
@@ -80,11 +118,8 @@ class ASRSlowAttacker(BaseAttacker):
         scaled_noise = scale.unsqueeze(-1) * noise  # (*, 1) * (*, L) = (*, L)
         return waveform + scaled_noise  # (*, L)
     
-    def compute_per(
-            self, 
-            adv_audios: torch.Tensor, 
-            ori_audios: torch.Tensor,
-        ):
+    
+    def compute_per(self, adv_audios: torch.Tensor, ori_audios: torch.Tensor):
         if self.att_norm == 'l2':
             curr_dist = self.mse_loss(
                 self.flatten(adv_audios),
@@ -97,10 +132,7 @@ class ASRSlowAttacker(BaseAttacker):
         return curr_dist  
     
 
-    def compute_batch_score(
-            self, 
-            input_features: torch.Tensor,
-        ):
+    def compute_batch_score(self, input_features: torch.Tensor):
         b_size = input_features.shape[0] # batch size
         index_list = [i * self.num_beams for i in range(b_size + 1)]
         pred_len, seqs, out_scores = self.inference(input_features)
@@ -113,11 +145,7 @@ class ASRSlowAttacker(BaseAttacker):
         scores = [s[:pred_len[i]] for i, s in enumerate(scores)]
         return scores, seqs, pred_len
     
-    def compute_score(
-            self, 
-            input_features: torch.Tensor,
-            b_size: int = None
-        ):
+    def compute_score(self, input_features: torch.Tensor, b_size: int = None):
         total_size = input_features.shape[0] # batch size
         if b_size is None:
             b_size = total_size
@@ -147,8 +175,6 @@ class ASRSlowAttacker(BaseAttacker):
             if pred_lens[i] == 0:
                 loss.append(torch.tensor(0.0, requires_grad=True).to(self.device))
             else:
-                # print("s.shape: {}, self.pad_token_id: {}, self.eos_token_id: {}".format(
-                #     s.shape, self.pad_token_id, self.eos_token_id))
                 s[:, self.pad_token_id] = 1e-12
                 softmax_v = self.softmax(s)
                 eos_p = softmax_v[:pred_lens[i], self.eos_token_id]
@@ -159,19 +185,56 @@ class ASRSlowAttacker(BaseAttacker):
                 loss.append(self.bce_loss(pred, torch.zeros_like(pred)))
         return loss
     
-    def compute_loss(
-            self, 
-            input_features: torch.Tensor, 
-        ):
-        scores, seqs, pred_len = self.compute_score(input_features)
-        loss_list = self.leave_eos_target_loss(scores, seqs, pred_len)
-        return loss_list
+
+    def data_UE(self, scores: List[torch.Tensor]):
+        logits = scores[0].detach().unsqueeze(0) 
+        # Mask special tokens probs
+        logits[:, :, self.tokenizer.all_special_ids] = - float('inf')
+        probs = F.softmax(logits.float(), dim=-1)  # B X T X C
+        ue = data_uncertainty(probs, self.uncertainty_args.data_ue_type)  # B
+        return ue
     
-    def run_attack(
-            self, 
-            audio: np.ndarray, 
-            sample_rate: int,
-        ):
+    def model_UE(self, input_features: torch.Tensor):
+        logger.info("*******Perform stochastic inference*******")
+        convert_dropouts(self.model, self.uncertainty_args)
+        activate_mc_dropout(self.model, activate=True, random=self.uncertainty_args.inference_prob)
+
+        # self.model.eval()
+        # Model uncertainty: MC Dropout stochastic inference
+        dropout_eval_results = {}
+        dropout_eval_results["sampled_probabilities"] = []
+        with torch.no_grad():
+            for _ in range(self.uncertainty_args.committee_size):
+                scores, seqs, pred_len = self.compute_score(input_features)
+                print("scores {}".format(scores))
+                logits = scores[0].unsqueeze(0)
+                # Mask special tokens probs
+                logits[:, :, self.tokenizer.all_special_ids] = - float('inf')
+                probs = F.softmax(logits.float(), dim=-1)  # B X T X C
+                dropout_eval_results["sampled_probabilities"].append(probs.tolist())  # K X B X T X C
+
+        # Uncertainty estimation
+        prob_array = np.array(dropout_eval_results["sampled_probabilities"])  # K X B X T X C
+        if self.model_uncertainty == "bald":
+            ue = bald(prob_array)  # B
+        elif self.model_uncertainty == "max_prob":
+            ue = sampled_max_prob(prob_array)  # B
+        elif self.model_uncertainty == "prob_variance":
+            ue = probability_variance(prob_array)  # B
+        else:
+            raise ValueError("Uncertainty type not supported!")
+
+        activate_mc_dropout(self.model, activate=False)
+        logger.info("*******Done!!!*******")
+        return ue
+
+    
+    def compute_loss(self, input_features: torch.Tensor):
+        scores, seqs, pred_len = self.compute_score(input_features) # scores: list B of T X V
+        loss_list = self.leave_eos_target_loss(scores, seqs, pred_len)
+        return loss_list, scores, seqs, pred_len
+    
+    def run_attack(self, audio: np.ndarray, sample_rate: int = 16000):
         torch.autograd.set_detect_anomaly(True)
 
         ori_len = self.get_ASR_len(audio, sample_rate) # list
@@ -180,8 +243,6 @@ class ASRSlowAttacker(BaseAttacker):
 
         noise, noise_rate = librosa.load(self.noise, sr=sample_rate)
         noi_feature = self.process(noise, noise_rate) # (1, L, E)
-        # print("audio ({}): {}".format(ori_feature.shape, ori_feature))
-        # print("noise ({}): {}".format(noi_feature.shape, noi_feature))
         
         # Handle noise
         if noi_feature.shape[1] < ori_feature.shape[1]:
@@ -204,9 +265,14 @@ class ASRSlowAttacker(BaseAttacker):
             # print("adv_feature ({}): {}".format(adv_feature.shape, adv_feature))
             # adv_audios = self.tanh_space(w)
             # adv_audios = w
-            loss_list = self.compute_loss(adv_feature)
+            loss_list, scores, seqs, curr_len = self.compute_loss(adv_feature)
+            curr_pred = [self.tokenizer.decode(seq, skip_special_tokens=True) for seq in seqs]
+            print("curr_pred: {}".format(curr_pred))
+
+            # Calculate uncertainty
+            du = self.data_UE(scores)
+            mu = self.model_UE(adv_feature)
             loss = sum(loss_list)
-            # print("loss: {}".format(loss))
             # curr_per = self.compute_per(w, ori_audios)
             # print("curr_per", curr_per)
             # per_loss = self.relu(curr_per - self.max_per).sum()
@@ -214,12 +280,10 @@ class ASRSlowAttacker(BaseAttacker):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
             # print("w (after): ", w)
-            # print("w.grad (after): ", w.grad)
             # Update adversarial audios
-            curr_pred, curr_len = self.get_ASR_strings(adv_feature)
-            print("curr_pred: {}".format(curr_pred))
+            # curr_pred, curr_len = self.get_ASR_strings(adv_feature)
+
             is_best_adv = (curr_len > best_len)
             # mask = torch.tensor((1 - is_best_adv)).to(self.device) * (curr_per < self.max_per)
             # print("mask", mask)
@@ -234,8 +298,8 @@ class ASRSlowAttacker(BaseAttacker):
             if is_best_adv:
                 best_adv = adv_feature.detach()
                 best_len = curr_len
-            log_str = "i:%d, adv_loss:%.2f, best_len: (%.2f), curr_len:%.2f" % (
-                it, loss, float(sum(best_len)) / float(sum(ori_len)), sum(curr_len),
+            log_str = "epoch:%d, adv_loss:%.2f, best_len: %.2f, curr_len:%d, dU:%.4f, mU:%.4f" % (
+                it, loss, float(sum(best_len)) / float(sum(ori_len)), sum(curr_len), du[0], mu[0]
             )
             pbar.set_description(log_str)
             
@@ -244,7 +308,5 @@ class ASRSlowAttacker(BaseAttacker):
             
         
         
-        
-         
     
     
