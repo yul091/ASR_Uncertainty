@@ -2,8 +2,6 @@ import sys
 sys.dont_write_bytecode = True
 import torch
 import argparse
-# from models.speechbrain_pretrained import MyEncoderDecoderASR
-# from speechbrain.pretrained import EncoderASR
 from transformers import (
     AutoConfig,
     AutoTokenizer,

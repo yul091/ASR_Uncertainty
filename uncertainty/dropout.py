@@ -232,8 +232,8 @@ def convert_dropouts(model, ue_args):
         set_last_dropout(model, dropout_ctor(p=ue_args.inference_prob, activate=False))
 
     elif ue_args.dropout_subs == "all":
-        # convert_to_mc_dropout(model, {'Dropout': dropout_ctor})
-        convert_to_mc_dropout(model.electra.encoder, {"Dropout": dropout_ctor})
+        convert_to_mc_dropout(model, {'Dropout': dropout_ctor})
+        # convert_to_mc_dropout(model.electra.encoder, {"Dropout": dropout_ctor})
     else:
         raise ValueError(f"Wrong ue args {ue_args.dropout_subs}")
     
