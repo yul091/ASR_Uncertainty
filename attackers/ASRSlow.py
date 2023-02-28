@@ -257,6 +257,7 @@ class ASRSlowAttacker(BaseAttacker):
         w.requires_grad = True
         optimizer = Adam([w], lr=self.lr)
         pbar = tqdm(range(self.max_iter))
+        ue_dict = []
         
         for it in pbar:
             # print("w ({}): {}".format(w.shape, w))
@@ -272,6 +273,7 @@ class ASRSlowAttacker(BaseAttacker):
             # Calculate uncertainty
             du = self.data_UE(scores)
             mu = self.model_UE(adv_feature)
+            ue_dict.append({"du": du.item(), "mu": mu.item(), "feature": adv_feature.detach().cpu().numpy()})
             loss = sum(loss_list)
             # curr_per = self.compute_per(w, ori_audios)
             # print("curr_per", curr_per)
@@ -303,7 +305,7 @@ class ASRSlowAttacker(BaseAttacker):
             )
             pbar.set_description(log_str)
             
-        return best_adv, best_len
+        return best_adv, best_len, ue_dict
             
             
         

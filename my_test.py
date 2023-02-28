@@ -1,92 +1,99 @@
 import os
 import sys
 sys.dont_write_bytecode = True
-import shutil
 import argparse
-from evaluate import load
 from tqdm import tqdm
-from speechbrain.utils.data_utils import download_file
-from speechbrain.pretrained import EncoderDecoderASR
-# from speechbrain.utils.metric_stats import ErrorRateStats
 import time
+import jiwer
 import torch
 import torchaudio
 from torch.nn.utils.rnn import pad_sequence
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    AutoFeatureExtractor,
+    AutoProcessor,
+    AutoModelForSpeechSeq2Seq, # s2t, wav2vec2
+)
+from datasets import load_dataset
+from attackers import ASRSlowAttacker
 
 
 def main(args):
     # Get variables
-    model_name = args.model
-    dataset = args.dataset
-    split = "test-clean"
+    lr = args.lr
+    max_iter = args.max_iter
+    max_len = args.max_len
+    att_norm = args.att_norm
+    model_n_or_path = args.model
+    data_n_or_path = args.dataset
+    committee_size = args.committee_size
+    data_uncertainty = args.data_uncertainty
+    model_uncertainty = args.model_uncertainty
+    output_dir = args.output_dir
     device = args.device
 
-    # Load from pre-trained model
     if device == "cuda":
-        asr_model = EncoderDecoderASR.from_hparams(
-            source=f"speechbrain/{model_name}", 
-            savedir=f"pretrained_models/{model_name}", 
-            run_opts={"device":"cuda"}, # inference on GPU
-        )
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
-        asr_model = EncoderDecoderASR.from_hparams(
-            source=f"speechbrain/{model_name}", 
-            savedir=f"pretrained_models/{model_name}",
-        )
-    print(asr_model)
+        dev = torch.device("cpu")
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     
-    ###################################### Download #######################################
-    # Download + Unpacking test-clean of librispeech
-    if not os.path.exists(dataset):
-        os.makedirs(dataset)
-        MINILIBRI_TEST_URL = "https://www.openslr.org/resources/12/test-clean.tar.gz"
-        download_file(MINILIBRI_TEST_URL, 'test-clean.tar.gz')
-        shutil.unpack_archive( 'test-clean.tar.gz', '.')
-    #######################################################################################
-    
-    # Load metrics
-    wer = load('wer')
+    tokenizer = AutoTokenizer.from_pretrained(f"facebook/{model_n_or_path}")
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(f"facebook/{model_n_or_path}")
+    processor = AutoProcessor.from_pretrained(f"facebook/{model_n_or_path}")
+    ds = load_dataset(f"hf-internal-testing/{data_n_or_path}", "clean", split="validation")
+    sample_rate = ds[0]["audio"]["sampling_rate"]
+    print(model)
+    print(ds)
+
+    # Define attacker
+    attacker = ASRSlowAttacker(
+        device=dev,
+        tokenizer=tokenizer,
+        processor=processor,
+        model=model, 
+        lr=lr,
+        att_norm=att_norm,
+        max_iter=max_iter,
+        max_len=max_len,
+        committee_size=committee_size,
+        data_uncertainty=data_uncertainty,
+        model_uncertainty=model_uncertainty,
+    )
     
     # Iterate test audios
-    user = 61
-    para = 70968
-    extension = ".flac" # .wav
-    audio_folder = "{}/{}/{}/{}".format(dataset, split, user, para)
-    dialog_list = sorted(os.listdir(audio_folder))
-    pred_file = "{}-{}-{}-{}.preds.txt".format(dataset, user, para, model_name)
-    label_file = "{}/{}/{}/{}/{}-{}.trans.txt".format(dataset, split, user, para, user, para)
-    log_file = "{}-{}-{}.log".format(dataset, model_name, device)
+    pred_file = "{}/{}-{}.pred.txt".format(output_dir, data_n_or_path, model_n_or_path)
+    log_file = "{}/{}-{}-{}.log".format(output_dir, data_n_or_path, model_n_or_path, device)
     f = open(pred_file, 'w')
-    count = 0
     res = []
     
     time1 = time.time()
     os.system(f"sudo tegrastats --logfile {log_file} &") # start logging energy
-    for audio in tqdm(dialog_list):
-        if not audio.endswith(extension):
-            continue
-        count += 1
-        audio_path = os.path.join(audio_folder, audio)
-        output: str = asr_model.transcribe_file(audio_path)
-        res.append((audio, output.upper()))
+
+    # Inference
+    for i, ins in tqdm(enumerate(ds)):
+        audio = ins["audio"]['array'] # np.ndarray (seq_len, )
+        pred_len, seqs, _ = attacker.get_predictions(audio, sample_rate)
+        transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
+        res.append(transcription.upper())
+
     os.system("sudo pkill tegrastats") # stop logging energy
     time2 = time.time()
     
     # Write to file
-    for (audio, output) in res:
-        f.write("{} {}\n".format(audio.rstrip(extension), output))
+    for output in res:
+        f.write("{}\n".format(output))
     
     # Calculate WER
-    f2 = open(label_file, "r")
-    pred_res = [output for (audio, output) in res]
-    label_res = [' '.join(line.split()[1:]) for line in f2.read().splitlines()]
-    wer_score = wer.compute(predictions=pred_res, references=label_res)
-    # print(wer_score)
+    wer_score = jiwer.wer(ds["text"], res)
     print("Inferencing finished!")
     summary = "Total #seqs: {}, latency: {}s, avg latency: {:.4f}s, WER: {:.4f}".format(
-        count, 
+        len(ds), 
         time2 - time1,
-        (time2 - time1) / count if count > 0 else 0,
+        (time2 - time1) / len(ds) if len(ds) > 0 else 0,
         wer_score,
     )
     print(summary)
@@ -94,23 +101,20 @@ def main(args):
     
 
 if __name__ == "__main__":
-    
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", "-m", type=str, 
-                        default="asr-crdnn-rnnlm-librispeech", 
+    parser.add_argument("--model", type=str,
+                        default="s2t-small-librispeech-asr",
                         choices=[
-                            "asr-crdnn-rnnlm-librispeech",
-                            "asr-crdnn-transformerlm-librispeech",
-                            "asr-transformer-transformerlm-librispeech",
+                            "s2t-small-librispeech-asr",
                         ],
                         help="Path to the victim model")
-    parser.add_argument("--dataset", "-d", type=str,
-                        default="LibriSpeech",
-                        choices=[
-                            "LibriSpeech",
-                            "TIMIT",
-                        ],
-                        help="Dataset to test for speech-to-text WER.")
+    parser.add_argument("--dataset", type=str,
+                        default="librispeech_asr_dummy",
+                        help="Dataset to use for testing")
+    parser.add_argument("--output_dir", type=str,
+                        default="results",
+                        help="Directory to save the results")
     parser.add_argument("--device", "-dev", type=str,
                         default="cuda",
                         choices=[
@@ -118,49 +122,30 @@ if __name__ == "__main__":
                             "cuda",
                         ],
                         help="Device to run the model on.")
+    parser.add_argument("--max_iter", type=int,
+                        default=5,
+                        help="Maximum number of iterations")
+    parser.add_argument("--lr", type=float,
+                        default=0.001,
+                        help="Learning rate")
+    parser.add_argument("--att_norm", type=str,
+                        default='l2',
+                        choices=['l2', 'linf'],
+                        help="Norm to use for the attack")
+    parser.add_argument("--max_len", type=int,
+                        default=128,
+                        help="Maximum length of sequence to generate")
+    parser.add_argument("--committee_size", type=int,
+                        default=10,
+                        help="Number of stochastic inferences")
+    parser.add_argument("--data_uncertainty", '-du', type=str,
+                        default='vanilla',
+                        choices=['vanilla', 'entropy'],
+                        help="Data uncertainty estimation method")
+    parser.add_argument("--model_uncertainty", '-mu', type=str,
+                        default='prob_variance',
+                        choices=['prob_variance', 'bald', 'sampled_max_prob'],
+                        help="Model uncertainty estimation method")
+    
     args = parser.parse_args()
     main(args)
-
-    # ################################# Decode in the batch #################################
-    # # Decode the first sentence in the batch
-    # snt_1, fs = torchaudio.load(audio_1)
-    # wav_lens=torch.tensor([1.0])
-    # asr_model.transcribe_batch(snt_1, wav_lens)
-
-    # # Decode another sentence in the batch
-    # audio_2 = "/content/LibriSpeech/test-clean/1089/134686/1089-134686-0007.flac"
-    # snt_2, fs = torchaudio.load(audio_2)
-    # wav_lens=torch.tensor([1.0])
-    # asr_model.transcribe_batch(snt_2, wav_lens)
-
-    # # Decode both sentences within the same batch
-    # # Padding
-    # batch = pad_sequence(
-    #     [snt_1.squeeze(), snt_2.squeeze()], 
-    #     batch_first=True, 
-    #     padding_value=0.0,
-    # )
-    # wav_lens=torch.tensor([snt_1.shape[1]/batch.shape[1], snt_2.shape[1]/batch.shape[1]])
-    # asr_model.transcribe_batch(batch, wav_lens)
-
-    ############################ Set up a batch of 8 sentences ############################
-    # audio_files=[]
-    # audio_files.append('/content/LibriSpeech/test-clean/1089/134686/1089-134686-0030.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1089/134686/1089-134686-0014.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1089/134686/1089-134686-0007.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1089/134691/1089-134691-0000.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1089/134691/1089-134691-0003.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1188/133604/1188-133604-0030.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1089/134691/1089-134691-0019.flac')
-    # audio_files.append('/content/LibriSpeech/test-clean/1188/133604/1188-133604-0006.flac')
-
-    # sigs=[]
-    # lens=[]
-    # for audio_file in audio_files:
-    #     snt, fs = torchaudio.load(audio_file)
-    #     sigs.append(snt.squeeze())
-    #     lens.append(snt.shape[1])
-
-    # batch = pad_sequence(sigs, batch_first=True, padding_value=0.0)
-    # lens = torch.Tensor(lens) / batch.shape[1]
-    # asr_model.transcribe_batch(batch, lens)

@@ -2,6 +2,7 @@ import sys
 sys.dont_write_bytecode = True
 import torch
 import argparse
+from tqdm import tqdm
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -25,16 +26,13 @@ def main(args: argparse.Namespace):
     model_uncertainty = args.model_uncertainty
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    tokenizer = AutoTokenizer.from_pretrained(f"facebook/{model_n_or_path}")
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(f"facebook/{model_n_or_path}")
-    processor = AutoProcessor.from_pretrained(f"facebook/{model_n_or_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_n_or_path)
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(model_n_or_path)
+    processor = AutoProcessor.from_pretrained(model_n_or_path)
     ds = load_dataset(f"hf-internal-testing/{data_n_or_path}", "clean", split="validation")
+    sample_rate = ds[0]["audio"]["sampling_rate"]
     print(model)
     print(ds)
-
-    audio = ds[0]["audio"]["array"]
-    sample_rate = ds[0]["audio"]["sampling_rate"]
-    print("input ({}): {}, sample rate: {}".format(type(audio), audio.shape, sample_rate))
         
     # Define attacker
     attacker = ASRSlowAttacker(
@@ -52,35 +50,39 @@ def main(args: argparse.Namespace):
     )
 
     # Inference
-    pred_len, seqs, _ = attacker.get_predictions(audio, sample_rate)
-    transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
-    print("output ({}): {}".format(pred_len, transcription))
+    for i, ins in tqdm(enumerate(ds)):
+        audio = ins["audio"]['array'] # np.ndarray (seq_len, )
+        pred_len, seqs, _ = attacker.get_predictions(audio, sample_rate)
+        transcription = processor.batch_decode(seqs, skip_special_tokens=True)[0]
+        print("output ({}): {}".format(pred_len, transcription))
     
-    # Attack
-    best_adv, best_len = attacker.run_attack(
-        audio=audio,
-        sample_rate=sample_rate,
-    )
-    pred_len, best_seqs, _ = attacker.inference(best_adv)
-    assert pred_len == best_len
-    transcription = processor.batch_decode(best_seqs, skip_special_tokens=True)[0]
-    print("best_len: {}, output: {}".format(best_len, transcription))
+        # Attack
+        best_adv, best_len, ue_dict = attacker.run_attack(
+            audio=audio,
+            sample_rate=sample_rate,
+        )
+        pred_len, best_seqs, _ = attacker.inference(best_adv)
+        assert pred_len == best_len
+        transcription = processor.batch_decode(best_seqs, skip_special_tokens=True)[0]
+        print("best_len: {}, output: {}".format(best_len, transcription))
 
 
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str,
-                        default="s2t-small-librispeech-asr",
+                        default="facebook/s2t-small-librispeech-asr",
                         choices=[
-                            "s2t-small-librispeech-asr",
+                            "facebook/s2t-small-librispeech-asr",
+                            "openai/whisper-tiny.en",
+
                         ],
                         help="Path to the victim model")
     parser.add_argument("--dataset", type=str,
                         default="librispeech_asr_dummy",
                         help="Dataset to use for testing")
     parser.add_argument("--max_iter", type=int,
-                        default=5,
+                        default=10,
                         help="Maximum number of iterations")
     parser.add_argument("--lr", type=float,
                         default=0.001,
