@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 import librosa
 from torch.optim import Adam
-import torchaudio
 from torchaudio.utils import download_asset
 from typing import Optional, List, Union
 from .ASRbase import BaseAttacker
