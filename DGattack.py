@@ -2,6 +2,7 @@ import sys
 sys.dont_write_bytecode = True
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # avoid tensorflow warnings
+import logging
 import time
 import argparse
 import random
@@ -20,6 +21,7 @@ import evaluate
 from DialogueAPI import dialogue
 from attackers import WordAttacker, StructureAttacker
 from DGdataset import DGDataset
+logger = logging.getLogger(__name__)
 
 DATA2NAME = {
     "blended_skill_talk": "BST",
@@ -75,10 +77,10 @@ class DGAttackEval(DGDataset):
         self.cos_sims = []
         self.att_success = 0
         self.total_pairs = 0
+        self.adv_samples = [] # store adversarial samples for further analysis
         
-        # self.record = []
         att_method = args.attack_strategy
-        out_dir = args.out_dir
+        self.out_dir = args.out_dir
         model_n = args.model_name_or_path.split("/")[-1]
         dataset_n = DATA2NAME.get(args.dataset, args.dataset.split("/")[-1])
         combined = "combined" if args.use_combined_loss and att_method == 'structure' else "single"
@@ -86,12 +88,12 @@ class DGAttackEval(DGDataset):
         fitness = args.fitness if att_method == 'structure' else 'performance'
         select_beams = args.select_beams if att_method == 'structure' else 1
         max_num_samples = args.max_num_samples
-        file_path = f"{out_dir}/{combined}_{att_method}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.txt"
+        file_path = f"{self.out_dir}/{combined}_{att_method}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.txt"
         self.write_file = open(file_path, "w")
         
-
+        
     def log_and_save(self, display: str):
-        print(display)
+        logger.info(display)
         self.write_file.write(display + "\n")
         
 
@@ -169,12 +171,13 @@ class DGAttackEval(DGDataset):
                 free_message,
                 guided_message,
             ]
-            self.log_and_save("\nDialogue history: {}".format(original_context))
+
+            self.log_and_save(f"\nDialogue history: {original_context}")
             self.log_and_save("U--{} \n(Ref: ['{}', ...])".format(free_message, references[-1]))
             # Original generation
             text = original_context + self.sp_token + free_message
             output, time_gap = self.get_prediction(text)
-            self.log_and_save("G--{}".format(output))
+            self.log_and_save(f"G--{output}")
             
             if not output:
                 continue
@@ -190,6 +193,7 @@ class DGAttackEval(DGDataset):
             
             # Attack
             success, adv_his = self.attacker.run_attack(text, guided_message)
+            self.adv_samples.extend(adv_his) # text, length, error, latency
             new_text = adv_his[-1][0]
             new_free_message = new_text.split(self.sp_token)[1].strip()
             cos_sim = self.attacker.sent_encoder.get_sim(new_free_message, free_message)
@@ -198,7 +202,7 @@ class DGAttackEval(DGDataset):
                 continue
 
             self.log_and_save("U'--{} (cosine: {:.3f})".format(new_free_message, cos_sim))
-            self.log_and_save("G'--{}".format(output))
+            self.log_and_save(f"G'--{output}")
             adv_bleu_res, adv_rouge_res, adv_meteor_res, adv_pred_len = self.eval_metrics(output, references)
             
             # ASR
@@ -231,7 +235,7 @@ class DGAttackEval(DGDataset):
         # Sample test dataset
         ids = random.sample(range(len(test_dataset)), self.max_num_samples)
         test_dataset = test_dataset.select(ids)
-        print("Test dataset: ", test_dataset)
+        logger.info(f"Test dataset: {test_dataset}")
         for i, instance in tqdm(enumerate(test_dataset)):
             self.generation_step(instance)
 
@@ -255,7 +259,8 @@ class DGAttackEval(DGDataset):
             Cos_sims, Adv_len, Adv_t, Adv_bleu, Adv_rouge, Adv_meteor,
         ))
         self.log_and_save("Attack success rate: {:.2f}%".format(100*self.att_success/self.total_pairs))
-
+        # Save adv samples
+        torch.save(self.adv_samples, os.path.join(self.out_dir, "adv_samples.pt"))
 
 
 def main(args: argparse.Namespace):
@@ -278,7 +283,6 @@ def main(args: argparse.Namespace):
         os.makedirs(out_dir)
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    # device = torch.device('cpu')
     config = AutoConfig.from_pretrained(model_name_or_path, num_beams=num_beams, num_beam_groups=num_beam_groups)
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     if 'gpt' in model_name_or_path.lower():
@@ -310,6 +314,8 @@ def main(args: argparse.Namespace):
             max_len=max_len,
             max_per=max_per,
             task=task,
+            fitness=fitness,
+            select_beams=select_beams,
         )
     elif att_method.lower() == 'structure':
         attacker = StructureAttacker(
@@ -347,15 +353,6 @@ def main(args: argparse.Namespace):
     )
     dg.generation(test_dataset)
 
-    # # Save generation files
-    # model_n = model_name_or_path.split("/")[-1]
-    # dataset_n = DATA2NAME.get(dataset, dataset.split("/")[-1])
-    # combined = "combined" if use_combined_loss else "eos"
-    # file_path = f"{out_dir}/{combined}_{att_method}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.txt"
-    # with open(file_path, "w") as f:
-    #     for line in dg.record:
-    #         f.write(str(line) + "\n")
-    # f.close()
 
 
 if __name__ == "__main__":
@@ -374,17 +371,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_beams", type=int, default=2, help="Number of beams")
     parser.add_argument("--select_beams", type=int, default=1, help="Number of sentence beams to keep for each attack iteration")
     parser.add_argument("--num_beam_groups", type=int, default=1, help="Number of beam groups")
-    parser.add_argument("--fitness", type=str, default="performance", 
-                        choices=[
-                            "performance", 
-                            "length",
-                            "random",
-                            "combined",
-                        ], 
+    parser.add_argument("--fitness", type=str, default="length", 
+                        choices=["length", "performance", "random", "combined"],
                         help="Fitness function")
     parser.add_argument("--model_name_or_path", "-m", type=str, default="results/bart", help="Path to model")
-    parser.add_argument("--dataset", "-d", type=str, 
-                        default="blended_skill_talk", 
+    parser.add_argument("--dataset", "-d", type=str, default="blended_skill_talk", 
                         choices=[
                             "blended_skill_talk",
                             "conv_ai_2",
@@ -399,9 +390,8 @@ if __name__ == "__main__":
     parser.add_argument("--eos_weight", type=float, default=0.8, help="Weight for EOS gradient")
     parser.add_argument("--cls_weight", type=float, default=0.2, help="Weight for classification gradient")
     parser.add_argument("--use_combined_loss", action="store_true", help="Use combined loss")
-    parser.add_argument("--attack_strategy", "-a", type=str, 
-                        default='word', 
-                        choices=['structure', 'word',], 
+    parser.add_argument("--attack_strategy", "-a", type=str, default='word', 
+                        choices=['structure', 'word'], 
                         help="Attack strategy")
     args = parser.parse_args()
     main(args)

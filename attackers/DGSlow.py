@@ -10,7 +10,7 @@ from transformers import (
 import stanza
 from typing import Union, List
 from nltk.corpus import wordnet as wn
-from utils import GrammarChecker, ENGLISH_FILTER_WORDS, DEFAULT_TEMPLATES
+from utils import ENGLISH_FILTER_WORDS, DEFAULT_TEMPLATES
 from .DGbase import SlowAttacker
 
 
@@ -112,7 +112,6 @@ class StructureAttacker(SlowAttacker):
         bertmodel = AutoModelForMaskedLM.from_pretrained('bert-base-uncased')
         self.bertmodel = bertmodel.eval().to(self.device)
         self.num_of_perturb = 50
-        self.grammar = GrammarChecker()
         self.pos_dict = {'NOUN': 'n', 'VERB': 'v', 'ADV': 'r', 'ADJ': 'a'}
         self.pos_processor = stanza.Pipeline('en', processors='tokenize, mwt, pos, lemma')
         self.templates = DEFAULT_TEMPLATES

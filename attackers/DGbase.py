@@ -12,7 +12,7 @@ from transformers import (
     BertTokenizerFast,
     BartForConditionalGeneration, 
 )
-from utils import SentenceEncoder
+from utils import SentenceEncoder, GrammarChecker
 
 
 class BaseAttacker:
@@ -41,6 +41,7 @@ class BaseAttacker:
         self.task = task
         self.softmax = nn.Softmax(dim=1)
         self.bce_loss = nn.BCELoss()
+        self.grammar = GrammarChecker()
 
     @classmethod
     def _get_hparam(cls, namespace: Namespace, key: str, default=None):
@@ -421,9 +422,9 @@ class SlowAttacker(BaseAttacker):
             return new_strings, new_w1, new_w2
 
 
-        def get_best_adv(it, cur_sent, w1, w2, start, best_text, best_length, modified_pos, adv_history):
+        def get_best_adv(it, cur_sent, w1, w2, start, best_text, best_len, modified_pos, adv_his):
             if it == self.max_per:
-                return best_text, best_length, adv_history
+                return best_text, best_len, adv_his
             # Get new strings
             new_strings, new_w1, new_w2 = generate_new_strings(cur_sent, w1, w2)
             # Select the best strings
@@ -433,22 +434,25 @@ class SlowAttacker(BaseAttacker):
             # Beam search
             for i in range(len(cur_topk_strings)):
                 cur_pos, cur_text = cur_topk_strings[i]
+                cur_error = self.grammar.check(cur_text.split(self.sp_token)[1].strip()) # grammar error
                 cur_len = cur_lens[i]
                 if isinstance(cur_pos, list):
                     modified_pos.extend(cur_pos)
                 else:
                     modified_pos.append(int(cur_pos))
-                if cur_len > best_length:
-                    best_text = str(cur_text)
-                    best_length = int(cur_len)
-                print("[iteration %d][sent %d][len %d (%.2f)] %s" % (
-                    it, i, cur_len, cur_len/ori_len, cur_text.split(self.sp_token)[1].strip()
+                if cur_len > best_len:
+                    best_text = cur_text
+                    best_len = cur_len
+                    best_error = cur_error
+                print("[iteration %d | sent %d | len %d (%.2f) | error %.2f] %s" % (
+                    it, i, cur_len, cur_len/ori_len, cur_error,
+                    cur_text.split(self.sp_token)[1].strip(), 
                 ))
-                adv_history.append((deepcopy(best_text), int(best_length), end - start))
-                best_text, best_length, adv_history = get_best_adv(
-                    it+1, cur_text, new_w1, new_w2, end, best_text, best_length, modified_pos, adv_history
+                adv_his.append((deepcopy(best_text), best_len, best_error, end - start))
+                best_text, best_len, adv_his = get_best_adv(
+                    it+1, cur_text, new_w1, new_w2, end, best_text, best_len, modified_pos, adv_his
                 )
-            return best_text, best_length, adv_history
+            return best_text, best_len, adv_his
 
         get_best_adv(0, cur_adv_text, self.cls_weight, self.eos_weight, t1, best_adv_text, best_len, modify_pos, adv_his)
         if adv_his:
