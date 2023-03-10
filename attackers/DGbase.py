@@ -358,9 +358,10 @@ class SlowAttacker(BaseAttacker):
         (3) Save the adversarial samples -- adv_his.
         """
         torch.autograd.set_detect_anomaly(True)
-        ori_len, (best_adv_text, best_len), (cur_adv_text, cur_len) = self.prepare_attack(text)
-        ori_context = cur_adv_text.split(self.sp_token)[0].strip()
-        adv_his = []
+        ori_len, (best_adv_text, best_len), (ori_text, cur_len) = self.prepare_attack(text)
+        ori_context = ori_text.split(self.sp_token)[0].strip()
+        ori_error = self.grammar.check(text.split(self.sp_token)[1].strip()) # grammar error
+        adv_his = [(text, cur_len, ori_error, 'original')]
         modify_pos = [] # record already modified positions (avoid repeated perturbation)
         t1 = time.time()
             
@@ -422,14 +423,14 @@ class SlowAttacker(BaseAttacker):
             return new_strings, new_w1, new_w2
 
 
-        def get_best_adv(it, cur_sent, w1, w2, start, best_text, best_len, modified_pos, adv_his):
+        def get_best_adv(it: int, cur_sent: str, w1: float, w2: float, start: float, 
+                         best_text: str, best_len: int, modified_pos: list, adv_his: list):
             if it == self.max_per:
                 return best_text, best_len, adv_his
             # Get new strings
             new_strings, new_w1, new_w2 = generate_new_strings(cur_sent, w1, w2)
             # Select the best strings
             cur_topk_strings, cur_lens = self.select_best(new_strings, label, batch_size=3)
-            # print("\n[it {}] \ncur sent: {} \nnew_string: {} \ncur_strings: {}".format(it, cur_sent, new_strings, cur_topk_strings))
             end = time.time()
             # Beam search
             for i in range(len(cur_topk_strings)):
@@ -443,19 +444,21 @@ class SlowAttacker(BaseAttacker):
                 if cur_len > best_len:
                     best_text = cur_text
                     best_len = cur_len
-                    best_error = cur_error
+
                 print("[iteration %d | sent %d | len %d (%.2f) | error %.2f] %s" % (
                     it, i, cur_len, cur_len/ori_len, cur_error,
                     cur_text.split(self.sp_token)[1].strip(), 
                 ))
-                adv_his.append((deepcopy(best_text), best_len, best_error, end - start))
+                adv_his.append((cur_text, cur_len, cur_error, 'perturbed'))
                 best_text, best_len, adv_his = get_best_adv(
                     it+1, cur_text, new_w1, new_w2, end, best_text, best_len, modified_pos, adv_his
                 )
             return best_text, best_len, adv_his
 
-        get_best_adv(0, cur_adv_text, self.cls_weight, self.eos_weight, t1, best_adv_text, best_len, modify_pos, adv_his)
-        if adv_his:
-            return True, adv_his
-        else:
-            return False, [(deepcopy(cur_adv_text), deepcopy(cur_len), 0.0)]
+        best_text, best_len, adv_his = get_best_adv(0, ori_text, self.cls_weight, 
+                                                    self.eos_weight, t1, best_adv_text, 
+                                                    best_len, modify_pos, adv_his)
+        
+        success = True if len(adv_his) == 1 else False
+        return success, best_text, best_len, adv_his
+    

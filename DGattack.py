@@ -2,7 +2,6 @@ import sys
 sys.dont_write_bytecode = True
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # avoid tensorflow warnings
-import logging
 import time
 import argparse
 import random
@@ -21,7 +20,6 @@ import evaluate
 from DialogueAPI import dialogue
 from attackers import WordAttacker, StructureAttacker
 from DGdataset import DGDataset
-logger = logging.getLogger(__name__)
 
 DATA2NAME = {
     "blended_skill_talk": "BST",
@@ -85,15 +83,16 @@ class DGAttackEval(DGDataset):
         dataset_n = DATA2NAME.get(args.dataset, args.dataset.split("/")[-1])
         combined = "combined" if args.use_combined_loss and att_method == 'structure' else "single"
         max_per = args.max_per
-        fitness = args.fitness if att_method == 'structure' else 'performance'
-        select_beams = args.select_beams if att_method == 'structure' else 1
+        fitness = args.fitness
+        select_beams = args.select_beams
         max_num_samples = args.max_num_samples
-        file_path = f"{self.out_dir}/{combined}_{att_method}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.txt"
-        self.write_file = open(file_path, "w")
+        log_path = f"{self.out_dir}/{att_method}_{combined}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.txt"
+        self.res_path = f"{self.out_dir}/{att_method}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.res"
+        self.write_file = open(log_path, "w")
         
         
     def log_and_save(self, display: str):
-        logger.info(display)
+        print(display)
         self.write_file.write(display + "\n")
         
 
@@ -192,9 +191,8 @@ class DGAttackEval(DGDataset):
             self.ori_time.append(time_gap)
             
             # Attack
-            success, adv_his = self.attacker.run_attack(text, guided_message)
+            success, new_text, new_len, adv_his = self.attacker.run_attack(text, guided_message)
             self.adv_samples.extend(adv_his) # text, length, error, latency
-            new_text = adv_his[-1][0]
             new_free_message = new_text.split(self.sp_token)[1].strip()
             cos_sim = self.attacker.sent_encoder.get_sim(new_free_message, free_message)
             output, time_gap = self.get_prediction(new_text)
@@ -235,7 +233,7 @@ class DGAttackEval(DGDataset):
         # Sample test dataset
         ids = random.sample(range(len(test_dataset)), self.max_num_samples)
         test_dataset = test_dataset.select(ids)
-        logger.info(f"Test dataset: {test_dataset}")
+        print(f"Test dataset: {test_dataset}")
         for i, instance in tqdm(enumerate(test_dataset)):
             self.generation_step(instance)
 
@@ -260,7 +258,7 @@ class DGAttackEval(DGDataset):
         ))
         self.log_and_save("Attack success rate: {:.2f}%".format(100*self.att_success/self.total_pairs))
         # Save adv samples
-        torch.save(self.adv_samples, os.path.join(self.out_dir, "adv_samples.pt"))
+        torch.save(self.adv_samples, self.res_path)
 
 
 def main(args: argparse.Namespace):

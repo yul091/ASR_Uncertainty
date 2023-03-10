@@ -1,6 +1,6 @@
-ATT_METHOD=word # word, structure, fd, hotflip, textbugger, uat
+ATT_METHOD=word # word, structure
 MAX_PER=5
-MODEL_PATH=ckpt/bart # bart, t5, dialogpt, personagpt, gpt2
+MODEL_PATH=../QASlow/results/dialogpt # bart, t5, dialogpt
 DATASET=blended_skill_talk # blended_skill_talk, conv_ai_2, empathetic_dialogues, AlekseyKorshuk/persona-chat
 FITNESS=length # performance, length, combined
 NUM_SAMPLES=50
