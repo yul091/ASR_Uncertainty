@@ -53,7 +53,8 @@ DEFAULT_TEMPLATES = [
 
 class GrammarChecker:
     def __init__(self):
-        self.lang_tool = language_tool_python.LanguageTool('en-US', remote_server = "")
+        # self.lang_tool = language_tool_python.LanguageTool('en-US')
+        self.lang_tool = language_tool_python.LanguageToolPublicAPI('es')
 
     def check(self, sentence):
         '''
