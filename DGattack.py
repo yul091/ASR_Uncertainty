@@ -75,7 +75,6 @@ class DGAttackEval(DGDataset):
         self.cos_sims = []
         self.att_success = 0
         self.total_pairs = 0
-        self.adv_samples = [] # store adversarial samples for further analysis
         
         att_method = args.attack_strategy
         self.out_dir = args.out_dir
@@ -191,8 +190,7 @@ class DGAttackEval(DGDataset):
             self.ori_time.append(time_gap)
             
             # Attack
-            success, new_text, new_len, adv_his = self.attacker.run_attack(text, guided_message)
-            self.adv_samples.extend(adv_his) # text, length, error, latency
+            success, new_text, new_len = self.attacker.run_attack(text, guided_message)
             new_free_message = new_text.split(self.sp_token)[1].strip()
             cos_sim = self.attacker.sent_encoder.get_sim(new_free_message, free_message)
             output, time_gap = self.get_prediction(new_text)
@@ -258,7 +256,7 @@ class DGAttackEval(DGDataset):
         ))
         self.log_and_save("Attack success rate: {:.2f}%".format(100*self.att_success/self.total_pairs))
         # Save adv samples
-        torch.save(self.adv_samples, self.res_path)
+        torch.save(self.attacker.adv_his, self.res_path)
 
 
 def main(args: argparse.Namespace):

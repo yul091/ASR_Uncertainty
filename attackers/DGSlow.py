@@ -249,17 +249,9 @@ class StructureAttacker(SlowAttacker):
             new_pos_inf = nltk.tag.pos_tag(cur_tokens)
             # Only use sentences whose similar token's tag is still the same
             if new_pos_inf[masked_index][1] == cur_tags[masked_index][1]:
-                # print("[index {}] substituted: {}, pos tag: {}".format(
-                #     masked_index, tok, new_pos_inf[masked_index][1],
-                # ))
-                # new_t = self.tokenizer.encode(tokens[masked_index], add_special_tokens=False)[0]
-                # new_tensor = ori_tensors.clone()
-                # new_tensor[masked_index] = new_t
-                # new_sentence = self.tokenizer.decode(new_tensor, skip_special_tokens=True)
-                # new_sentence = self.formalize(new_sentence)
                 new_sentence = self.tokenizer.convert_tokens_to_string(cur_tokens)
                 # print("new sentence: ", new_sentence)
-                new_error = self.grammar.check(new_sentence)
+                # new_error = self.grammar.check(new_sentence)
                 # if new_error > cur_error:
                 #     continue
                 new_sentences.append((masked_index, new_sentence))

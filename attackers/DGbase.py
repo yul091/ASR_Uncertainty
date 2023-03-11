@@ -209,6 +209,7 @@ class SlowAttacker(BaseAttacker):
         self.cls_weight = cls_weight
         self.use_combined_loss = use_combined_loss
         self.sent_encoder = SentenceEncoder(device='cpu')
+        self.adv_his = []
 
     def leave_eos_loss(self, scores: list, pred_len: list):
         loss = []
@@ -271,8 +272,14 @@ class SlowAttacker(BaseAttacker):
                 batch_strings = [x[1] + self.eos_token for x in new_strings[st:ed]]
             if not batch_strings:
                 continue
+            
             scores, seqs, p_len = self.compute_batch_score(batch_strings)
             pred_len.extend(p_len)
+            self.adv_his.extend([
+                (txt, p_len[i], self.grammar.check(txt.split(self.sp_token)[1].strip()), 'perturbed') 
+                for i, txt in enumerate(batch_strings)
+            ])
+            
             if self.fitness == 'performance' or self.fitness == 'combined':
                 label = self.tokenizer(goal, truncation=True, max_length=self.max_len, return_tensors='pt')
                 label = label['input_ids'][0] # (T, )
@@ -361,7 +368,8 @@ class SlowAttacker(BaseAttacker):
         ori_len, (best_adv_text, best_len), (ori_text, cur_len) = self.prepare_attack(text)
         ori_context = ori_text.split(self.sp_token)[0].strip()
         ori_error = self.grammar.check(text.split(self.sp_token)[1].strip()) # grammar error
-        adv_his = [(text, cur_len, ori_error, 'original')]
+        self.adv_his = [(text, cur_len, ori_error, 'original')]
+        adv_his = []
         modify_pos = [] # record already modified positions (avoid repeated perturbation)
         t1 = time.time()
             
@@ -430,12 +438,11 @@ class SlowAttacker(BaseAttacker):
             # Get new strings
             new_strings, new_w1, new_w2 = generate_new_strings(cur_sent, w1, w2)
             # Select the best strings
-            cur_topk_strings, cur_lens = self.select_best(new_strings, label, batch_size=3)
+            cur_topk_strings, cur_lens = self.select_best(new_strings, label, 3)
             end = time.time()
             # Beam search
             for i in range(len(cur_topk_strings)):
                 cur_pos, cur_text = cur_topk_strings[i]
-                cur_error = self.grammar.check(cur_text.split(self.sp_token)[1].strip()) # grammar error
                 cur_len = cur_lens[i]
                 if isinstance(cur_pos, list):
                     modified_pos.extend(cur_pos)
@@ -445,20 +452,21 @@ class SlowAttacker(BaseAttacker):
                     best_text = cur_text
                     best_len = cur_len
 
-                print("[iteration %d | sent %d | len %d (%.2f) | error %.2f] %s" % (
-                    it, i, cur_len, cur_len/ori_len, cur_error,
-                    cur_text.split(self.sp_token)[1].strip(), 
+                print("[iteration %d | sent %d | len %d (%.2f)] %s" % (
+                    it, i, cur_len, cur_len/ori_len, cur_text.split(self.sp_token)[1].strip(), 
                 ))
-                adv_his.append((cur_text, cur_len, cur_error, 'perturbed'))
+                adv_his.append((cur_text, cur_len, end-start))
                 best_text, best_len, adv_his = get_best_adv(
-                    it+1, cur_text, new_w1, new_w2, end, best_text, best_len, modified_pos, adv_his
+                    it+1, cur_text, new_w1, new_w2, end, 
+                    best_text, best_len, modified_pos, adv_his,
                 )
             return best_text, best_len, adv_his
 
         best_text, best_len, adv_his = get_best_adv(0, ori_text, self.cls_weight, 
                                                     self.eos_weight, t1, best_adv_text, 
                                                     best_len, modify_pos, adv_his)
-        
-        success = True if len(adv_his) == 1 else False
-        return success, best_text, best_len, adv_his
+        if adv_his:
+            return True, best_text, best_len
+        else:
+            return False, best_text, best_len
     
