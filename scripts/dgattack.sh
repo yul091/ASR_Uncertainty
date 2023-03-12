@@ -1,15 +1,15 @@
-ATT_METHOD=word # word, structure
+ATT_METHOD=structure # word, structure
 MAX_PER=5
-MODEL_PATH=ckpt/bart # ../QASlow/results/bart, t5, dialogpt
-DATASET=blended_skill_talk # blended_skill_talk, conv_ai_2, empathetic_dialogues, AlekseyKorshuk/persona-chat
+MODEL_PATH=../DG_ckpt/bart # bart, t5, dialogpt
+DATASET=empathetic_dialogues # blended_skill_talk, conv_ai_2, empathetic_dialogues, AlekseyKorshuk/persona-chat
 FITNESS=length # performance, length, combined
-NUM_SAMPLES=10
+NUM_SAMPLES=-1
 MAX_LENGTH=150
 SELECT_BEAMS=2
 RES_DIR=results # where to save logs and results
 
 
-CUDA_VISIBLE_DEVICES=0 python -W ignore DGattack.py \
+CUDA_VISIBLE_DEVICES=7 python -W ignore DGattack.py \
     --attack_strategy $ATT_METHOD \
     --max_per $MAX_PER \
     --model_name_or_path $MODEL_PATH \
@@ -19,3 +19,4 @@ CUDA_VISIBLE_DEVICES=0 python -W ignore DGattack.py \
     --select_beams $SELECT_BEAMS \
     --out_dir $RES_DIR \
     --fitness $FITNESS \
+    --pred_only

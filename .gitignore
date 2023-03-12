@@ -1,3 +1,4 @@
 results/*
 ckpt/*
-checkpoint/*
+checkpoints/*
+datasets/*
