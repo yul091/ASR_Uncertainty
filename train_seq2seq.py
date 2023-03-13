@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 from typing import Union, List, Dict, Tuple, Optional, Any, Sequence
 import math
 import glob
+import pandas as pd
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -149,31 +150,31 @@ class Seq2SeqSystem(pl.LightningModule):
         tgt_id_seq = [other['sequence'][di][0].data[0] for di in range(length)]
         tgt_seq = self.tokenizer.batch_decode(tgt_id_seq, skip_special_tokens=True)[0]
         return tgt_seq, len(tgt_id_seq)
-        
     
-    # def predict_batch(self, batch, batch_idx):
-    #     input_variables = getattr(batch, 'input_ids')
-    #     input_lengths = getattr(batch, 'input_lens')
-    #     target_variables = getattr(batch, 'labels')
+    
+    @torch.no_grad()
+    def predict_batch(self, batch, batch_idx):
+        input_variables = getattr(batch, 'input_ids')
+        input_lengths = getattr(batch, 'input_lens')
+        target_variables = getattr(batch, 'labels')
+        target_lengths = getattr(batch, 'target_lens')
         
-    #     # Forward propagation
-    #     _, _, other = self.model(
-    #         input_variables, 
-    #         input_lengths, 
-    #         target_variables,
-    #         teacher_forcing_ratio=self.teacher_forcing_ratio,
-    #     )
-    #     lengths = other['length']
+        # Forward propagation
+        _, _, other = self.forward(
+            input_variables, 
+            input_lengths, 
+        )
+        lengths = other['length']
         
-    #     # Decode
-    #     tgt_id_seqs = [[other['sequence'][di][0].data[0] for di in range(len)] for len in lengths]
-    #     # tgt_seqs = self.tokenizer.batch_decode(tgt_id_seqs, skip_special_tokens=True)
-    #     return {
-    #         'input_ids': input_variables,
-    #         'pred_ids': tgt_id_seqs,   
-    #         # 'pred_seqs': tgt_seqs,
-    #         'labels': target_variables,
-    #     }
+        # Decode
+        tgt_id_seqs = [[other['sequence'][di][0].data[0] for di in range(len)] for len in lengths]
+        # tgt_seqs = self.tokenizer.batch_decode(tgt_id_seqs, skip_special_tokens=True)
+        return {
+            'input_ids': input_variables,
+            'pred_ids': tgt_id_seqs,   
+            'label_lens': target_lengths,
+            'labels': target_variables,
+        }
     
     
     @torch.no_grad()
@@ -269,6 +270,7 @@ class Seq2SeqSystem(pl.LightningModule):
         
     def test_epoch_end(self, outputs: List[dict]):
         self.eval_epoch_end(outputs, 'test')
+        
         
         
     #     # Convert the predict and label ids to lists of tokens
@@ -405,8 +407,31 @@ if __name__ == '__main__':
             time.time() - test_start, os.path.basename(args.ckpt_dir)
         ))
         
-    while True:
-        pred, pred_len = model.predict_sequence('I am a student, what do you do?')
+    # while True:
+    #     pred, pred_len = model.predict_sequence('I am a student, what do you do?')
+    #     print(f"prediction ({pred_len}): {pred}")
+    #     break
+    
+    test_dataset = model.test_dataloader().dataset.dataset
+    print(test_dataset)
+    test_df = pd.DataFrame(test_dataset).groupby('src', as_index=False).agg(list)
+    print(test_df.head())
+    res = []
+    for i, row in tqdm(test_df.iterrows()):
+        print(f"row {i}: {row}")
+        src, tgts, src_len, tgt_lens = row
+        pred, pred_len = model.predict_sequence(src)
         print(f"prediction ({pred_len}): {pred}")
-        break
+        res_dict = {
+            'src': src,
+            'src_len': src_len,
+            'tgts': tgts,
+            'tgt_lens': tgt_lens,
+            'pred': pred,
+            'pred_len': pred_len,
+        }
+        res.append(res_dict)
+        
+    res_df = pd.DataFrame(res)
+    res_df.to_csv('datasets/seq2seq_pred.tsv', index=False)
     

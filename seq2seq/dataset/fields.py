@@ -49,6 +49,7 @@ class Seq2SeqDataset(Dataset):
             'input_ids': src, 
             'input_lens': src.size(0),
             'labels': tgt,
+            'label_lens': tgt.size(0),
         }
 
 
