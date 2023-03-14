@@ -40,6 +40,7 @@ class DGAttackEval(DGDataset):
         bleu: evaluate.load("bleu") = None, 
         rouge: evaluate.load("rouge") = None,
         meteor: evaluate.load("meteor") = None,
+        pred_only: bool = False,
     ):
         super(DGAttackEval, self).__init__(
             dataset=args.dataset,
@@ -66,6 +67,7 @@ class DGAttackEval(DGDataset):
         self.bleu = bleu
         self.rouge = rouge
         self.meteor = meteor
+        self.pred_only = pred_only
 
         self.ori_lens, self.adv_lens = [], []
         self.ori_bleus, self.adv_bleus = [], []
@@ -78,16 +80,24 @@ class DGAttackEval(DGDataset):
         
         att_method = args.attack_strategy
         self.out_dir = args.out_dir
-        model_n = args.model_name_or_path.split("/")[-1]
+        self.model_n = args.model_name_or_path.split("/")[-1]
         dataset_n = DATA2NAME.get(args.dataset, args.dataset.split("/")[-1])
         combined = "combined" if args.use_combined_loss and att_method == 'structure' else "single"
         max_per = args.max_per
         fitness = args.fitness
         select_beams = args.select_beams
-        max_num_samples = args.max_num_samples
-        log_path = f"{self.out_dir}/{att_method}_{combined}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.txt"
-        self.res_path = f"{self.out_dir}/{att_method}_{max_per}_{fitness}_{select_beams}_{model_n}_{dataset_n}_{max_num_samples}.res"
-        self.write_file = open(log_path, "w")
+        max_n_samples = args.max_num_samples
+        
+        if self.pred_only:
+            log_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.txt"
+            self.write_file = open(log_path, "w")
+            self.res_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.res"
+            self.pred_res = []
+        else:
+            log_path = f"{self.out_dir}/{att_method}_{combined}_{max_per}_{fitness}_{select_beams}_{self.model_n}_{dataset_n}_{max_n_samples}.txt"
+            self.write_file = open(log_path, "w")
+            self.res_path = f"{self.out_dir}/{att_method}_{max_per}_{fitness}_{select_beams}_{self.model_n}_{dataset_n}_{max_n_samples}.res"
+        
         
         
     def log_and_save(self, display: str):
@@ -180,6 +190,19 @@ class DGAttackEval(DGDataset):
             if not output:
                 continue
             bleu_res, rouge_res, meteor_res, pred_len = self.eval_metrics(output, references)
+            if self.pred_only:
+                self.pred_res.append((
+                    self.model_n,
+                    text, 
+                    output,
+                    references,
+                    pred_len, 
+                    bleu_res['bleu'], 
+                    rouge_res['rougeL'], 
+                    meteor_res['meteor'],
+                    time_gap, 
+                ))
+            
             self.log_and_save("(length: {}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f})".format(
                 pred_len, time_gap, bleu_res['bleu'], rouge_res['rougeL'], meteor_res['meteor'],
             ))
@@ -190,38 +213,39 @@ class DGAttackEval(DGDataset):
             self.ori_time.append(time_gap)
             
             # Attack
-            success, new_text, new_len = self.attacker.run_attack(text, guided_message)
-            new_free_message = new_text.split(self.sp_token)[1].strip()
-            cos_sim = self.attacker.sent_encoder.get_sim(new_free_message, free_message)
-            output, time_gap = self.get_prediction(new_text)
-            if not output:
-                continue
+            if not self.pred_only:
+                success, new_text, new_len = self.attacker.run_attack(text, guided_message)
+                new_free_message = new_text.split(self.sp_token)[1].strip()
+                cos_sim = self.attacker.sent_encoder.get_sim(new_free_message, free_message)
+                output, time_gap = self.get_prediction(new_text)
+                if not output:
+                    continue
 
-            self.log_and_save("U'--{} (cosine: {:.3f})".format(new_free_message, cos_sim))
-            self.log_and_save(f"G'--{output}")
-            adv_bleu_res, adv_rouge_res, adv_meteor_res, adv_pred_len = self.eval_metrics(output, references)
-            
-            # ASR
-            success = (
-                (bleu_res['bleu'] > adv_bleu_res['bleu']) or 
-                (rouge_res['rougeL'] > adv_rouge_res['rougeL']) or 
-                (meteor_res['meteor'] > adv_meteor_res['meteor'])
-                ) and cos_sim > 0.01
-            if success:
-                self.att_success += 1
-            else:
-                self.log_and_save("Attack failed!")
+                self.log_and_save("U'--{} (cosine: {:.3f})".format(new_free_message, cos_sim))
+                self.log_and_save(f"G'--{output}")
+                adv_bleu_res, adv_rouge_res, adv_meteor_res, adv_pred_len = self.eval_metrics(output, references)
+                
+                # ASR
+                success = (
+                    (bleu_res['bleu'] > adv_bleu_res['bleu']) or 
+                    (rouge_res['rougeL'] > adv_rouge_res['rougeL']) or 
+                    (meteor_res['meteor'] > adv_meteor_res['meteor'])
+                    ) and cos_sim > 0.01
+                if success:
+                    self.att_success += 1
+                else:
+                    self.log_and_save("Attack failed!")
 
-            self.log_and_save("(length: {}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f})".format(
-                adv_pred_len, time_gap, adv_bleu_res['bleu'], adv_rouge_res['rougeL'], adv_meteor_res['meteor'],
-            ))
-            self.adv_lens.append(adv_pred_len)
-            self.adv_bleus.append(adv_bleu_res['bleu'])
-            self.adv_rouges.append(adv_rouge_res['rougeL'])
-            self.adv_meteors.append(adv_meteor_res['meteor'])
-            self.adv_time.append(time_gap)
-            self.cos_sims.append(cos_sim)
-            self.total_pairs += 1
+                self.log_and_save("(length: {}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f})".format(
+                    adv_pred_len, time_gap, adv_bleu_res['bleu'], adv_rouge_res['rougeL'], adv_meteor_res['meteor'],
+                ))
+                self.adv_lens.append(adv_pred_len)
+                self.adv_bleus.append(adv_bleu_res['bleu'])
+                self.adv_rouges.append(adv_rouge_res['rougeL'])
+                self.adv_meteors.append(adv_meteor_res['meteor'])
+                self.adv_time.append(time_gap)
+                self.cos_sims.append(cos_sim)
+                self.total_pairs += 1
 
 
     def generation(self, test_dataset: Dataset):
@@ -229,34 +253,41 @@ class DGAttackEval(DGDataset):
             test_dataset = self.group_ED(test_dataset)
 
         # Sample test dataset
-        ids = random.sample(range(len(test_dataset)), self.max_num_samples)
-        test_dataset = test_dataset.select(ids)
+        if self.max_num_samples > 0:
+            print(f"Sampling {self.max_num_samples} samples from test dataset...")
+            ids = random.sample(range(len(test_dataset)), self.max_num_samples)
+            test_dataset = test_dataset.select(ids)
+            
         print(f"Test dataset: {test_dataset}")
         for i, instance in tqdm(enumerate(test_dataset)):
             self.generation_step(instance)
 
         Ori_len = np.mean(self.ori_lens)
-        Adv_len = np.mean(self.adv_lens)
         Ori_bleu = np.mean(self.ori_bleus)
-        Adv_bleu = np.mean(self.adv_bleus)
         Ori_rouge = np.mean(self.ori_rouges)
-        Adv_rouge = np.mean(self.adv_rouges)
         Ori_meteor = np.mean(self.ori_meteors)
-        Adv_meteor = np.mean(self.adv_meteors)
-        Cos_sims = np.mean(self.cos_sims)
         Ori_t = np.mean(self.ori_time)
-        Adv_t = np.mean(self.adv_time)
-
-        # Summarize eval results
+        
         self.log_and_save("\nOriginal output length: {:.3f}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f}".format(
             Ori_len, Ori_t, Ori_bleu, Ori_rouge, Ori_meteor,
         ))
-        self.log_and_save("Perturbed [cosine: {:.3f}] output length: {:.3f}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f}".format(
-            Cos_sims, Adv_len, Adv_t, Adv_bleu, Adv_rouge, Adv_meteor,
-        ))
-        self.log_and_save("Attack success rate: {:.2f}%".format(100*self.att_success/self.total_pairs))
-        # Save adv samples
-        torch.save(self.attacker.adv_his, self.res_path)
+        
+        if self.pred_only:
+            torch.save(self.pred_res, self.res_path)
+        else:
+            Adv_len = np.mean(self.adv_lens)
+            Adv_bleu = np.mean(self.adv_bleus)
+            Adv_rouge = np.mean(self.adv_rouges)
+            Adv_meteor = np.mean(self.adv_meteors)
+            Cos_sims = np.mean(self.cos_sims)
+            Adv_t = np.mean(self.adv_time)
+        
+            self.log_and_save("Perturbed [cosine: {:.3f}] output length: {:.3f}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f}".format(
+                Cos_sims, Adv_len, Adv_t, Adv_bleu, Adv_rouge, Adv_meteor,
+            ))
+            self.log_and_save("Attack success rate: {:.2f}%".format(100*self.att_success/self.total_pairs))
+            # Save adv samples
+            torch.save(self.attacker.adv_his, self.res_path)
 
 
 def main(args: argparse.Namespace):
@@ -272,6 +303,7 @@ def main(args: argparse.Namespace):
     att_method = args.attack_strategy
     cls_weight = args.cls_weight
     eos_weight = args.eos_weight
+    pred_only = args.pred_only
     use_combined_loss = args.use_combined_loss
     out_dir = args.out_dir
 
@@ -346,6 +378,7 @@ def main(args: argparse.Namespace):
         bleu=bleu,
         rouge=rouge,
         meteor=meteor,
+        pred_only=pred_only,
     )
     dg.generation(test_dataset)
 
@@ -354,14 +387,14 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     import ssl
     import argparse
-    # import nltk
-    # nltk.download('wordnet')
-    # nltk.download('omw-1.4')
-    # nltk.download('averaged_perceptron_tagger')
+    import nltk
+    nltk.download('wordnet')
+    nltk.download('omw-1.4')
+    nltk.download('averaged_perceptron_tagger')
     ssl._create_default_https_context = ssl._create_unverified_context
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max_num_samples", type=int, default=3, help="Number of samples to attack")
+    parser.add_argument("--max_num_samples", type=int, default=-1, help="Number of samples to attack")
     parser.add_argument("--max_per", type=int, default=5, help="Number of perturbation iterations per sample")
     parser.add_argument("--max_len", type=int, default=1024, help="Maximum length of generated sequence")
     parser.add_argument("--num_beams", type=int, default=2, help="Number of beams")
@@ -383,6 +416,7 @@ if __name__ == "__main__":
                         default="results/logging",
                         help="Output directory")
     parser.add_argument("--seed", type=int, default=2019, help="Random seed")
+    parser.add_argument("--pred_only", action="store_true", help="Whether to attack or just predict")
     parser.add_argument("--eos_weight", type=float, default=0.8, help="Weight for EOS gradient")
     parser.add_argument("--cls_weight", type=float, default=0.2, help="Weight for classification gradient")
     parser.add_argument("--use_combined_loss", action="store_true", help="Use combined loss")

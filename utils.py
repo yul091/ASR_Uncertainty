@@ -1,4 +1,7 @@
 
+import torch
+import random
+import numpy as np
 import language_tool_python
 from sentence_transformers import SentenceTransformer, util
 
@@ -115,3 +118,13 @@ class SentenceEncoder:
                     best_index = i
 
         return best_adv, best_index, best_sim
+    
+    
+    
+def set_seed(seed: int, gpu: bool = True):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if gpu:
+        torch.cuda.manual_seed_all(seed)
+    print('Set seeds to {}'.format(seed))
