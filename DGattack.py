@@ -104,7 +104,7 @@ class DGAttackEval(DGDataset):
         if self.pred_only:
             log_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.txt"
             self.write_file = open(log_path, "w")
-            self.res_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.csv"
+            self.res_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.res"
             self.pred_res = []
         else:
             log_path = f"{self.out_dir}/{att_method}_{combined}_{max_per}_{fitness}_{select_beams}_{self.model_n}_{dataset_n}_{max_n_samples}.txt"
@@ -440,8 +440,8 @@ class DGAttackEval(DGDataset):
         
         if self.pred_only:
             pred_df = pd.DataFrame(self.pred_res)
-            # torch.save(self.pred_res, self.res_path)
-            pred_df.to_csv(self.res_path, index=False)
+            torch.save(self.pred_res, self.res_path)
+            # pred_df.to_csv(self.res_path, index=False)
         else:
             Adv_len = np.mean(self.adv_lens)
             Adv_bleu = np.mean(self.adv_bleus)
