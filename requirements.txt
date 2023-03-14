@@ -1,5 +1,5 @@
 scikit-learn==0.24
-transformers
+transformers==4.24.0
 librosa
 jiwer
 stanza
