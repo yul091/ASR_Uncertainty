@@ -208,7 +208,7 @@ class SlowAttacker(BaseAttacker):
         self.eos_weight = eos_weight
         self.cls_weight = cls_weight
         self.use_combined_loss = use_combined_loss
-        self.sent_encoder = SentenceEncoder(device='cpu')
+        self.sent_encoder = SentenceEncoder(device=self.device)
         self.adv_his = []
 
     def leave_eos_loss(self, scores: list, pred_len: list):

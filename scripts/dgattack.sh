@@ -1,9 +1,9 @@
 ATT_METHOD=structure # word, structure
 MAX_PER=5
-MODEL_PATH=ckpt/t5 # ../QASlow/results/bart, t5, dialogpt
+MODEL_PATH=ckpt/bart # bart, t5, dialogpt
 DATASET=blended_skill_talk # blended_skill_talk, conv_ai_2, empathetic_dialogues, AlekseyKorshuk/persona-chat
 FITNESS=length # performance, length, combined
-NUM_SAMPLES=2
+NUM_SAMPLES=10
 MAX_LENGTH=150
 SELECT_BEAMS=2
 RES_DIR=results # where to save logs and results

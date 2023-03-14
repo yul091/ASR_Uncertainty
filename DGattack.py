@@ -6,12 +6,16 @@ import time
 import argparse
 import random
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
-from typing import List
+from typing import List, Union, Callable, Dict
 import torch
 from transformers import (
     AutoConfig, 
     AutoTokenizer, 
+    BertTokenizer,
+    BartTokenizer,
+    T5Tokenizer,
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
 )
@@ -20,6 +24,14 @@ import evaluate
 from DialogueAPI import dialogue
 from attackers import WordAttacker, StructureAttacker
 from DGdataset import DGDataset
+from utils import (
+    output_score1,
+    output_score2,
+    output_score3,
+    output_score4,
+    SentenceEncoder,
+)
+from sklearn.neural_network import MLPRegressor
 
 DATA2NAME = {
     "blended_skill_talk": "BST",
@@ -27,6 +39,7 @@ DATA2NAME = {
     "empathetic_dialogues": "ED",
     "AlekseyKorshuk/persona-chat": "PC",
 }
+
 
 class DGAttackEval(DGDataset):
     def __init__(
@@ -91,13 +104,12 @@ class DGAttackEval(DGDataset):
         if self.pred_only:
             log_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.txt"
             self.write_file = open(log_path, "w")
-            self.res_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.res"
+            self.res_path = f"{self.out_dir}/{self.model_n}_{dataset_n}_{max_n_samples}.csv"
             self.pred_res = []
         else:
             log_path = f"{self.out_dir}/{att_method}_{combined}_{max_per}_{fitness}_{select_beams}_{self.model_n}_{dataset_n}_{max_n_samples}.txt"
             self.write_file = open(log_path, "w")
             self.res_path = f"{self.out_dir}/{att_method}_{max_per}_{fitness}_{select_beams}_{self.model_n}_{dataset_n}_{max_n_samples}.res"
-        
         
         
     def log_and_save(self, display: str):
@@ -106,6 +118,7 @@ class DGAttackEval(DGDataset):
         
 
     def get_prediction(self, text: str):
+        t1 = time.time()
         if self.task == 'seq2seq':
             effective_text = text 
         else:
@@ -118,7 +131,6 @@ class DGAttackEval(DGDataset):
             max_length=self.max_source_length-1,
         )
         input_ids = inputs.input_ids.to(self.device)
-        t1 = time.time()
         with torch.no_grad():
             outputs = dialogue(
                 self.model, 
@@ -138,7 +150,145 @@ class DGAttackEval(DGDataset):
             )[0]
         t2 = time.time()
         return output.strip(), t2 - t1
-
+    
+    
+    def seq2seq_process(
+        self,
+        dataset: Dataset, 
+        tokenizer: Union[BertTokenizer, BartTokenizer, T5Tokenizer],
+    ) -> pd.DataFrame: 
+        print(f"Preprocessing {self.dataset} dataset...")
+        processed = []
+        for i, ins in tqdm(enumerate(dataset)):
+            num_entries, total_entries, context, prev_utt_pc = self.prepare_context(ins)
+            for entry_idx in range(num_entries):
+                free_message, guided_message, original_context, references = self.prepare_entry(
+                    ins, 
+                    entry_idx, 
+                    context, 
+                    prev_utt_pc,
+                    total_entries,
+                )
+                if guided_message is None:
+                    continue
+                
+                prev_utt_pc += [
+                    free_message,
+                    guided_message,
+                ]
+                
+                # Original generation
+                text = original_context + self.sp_token + free_message
+                for ref in references:
+                    processed.append({
+                        'src': text,
+                        'tgt': ref,
+                        'src_len': len(tokenizer.tokenize(text)),
+                        'tgt_len': len(tokenizer.tokenize(ref)),
+                    })
+                
+        processed = pd.DataFrame(processed, columns=['src', 'tgt', 'src_len', 'tgt_len'])
+        print("Preprocessing done!")
+        print(processed.head())
+        return processed
+    
+    
+    def get_seq2seq_dataset(self, all_datasets: Dict[str, Dataset]): 
+        # Get seq2seq data
+        data_dir = 'datasets'
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        else:
+            if os.path.exists(f'{data_dir}/train.tsv'):
+                processed_train = pd.read_csv(f'{data_dir}/train.tsv', sep='\t')
+            else:
+                processed_train = self.seq2seq_process(all_datasets['train'], self.tokenizer)
+                processed_train.to_csv(f'{data_dir}/train.tsv', sep='\t', index=False)
+            if os.path.exists(f'{data_dir}/val.tsv'):
+                processed_val = pd.read_csv(f'{data_dir}/val.tsv', sep='\t')
+            else:
+                try:
+                    processed_val = self.seq2seq_process(all_datasets['validation'], self.tokenizer)
+                except:
+                    processed_val = self.seq2seq_process(all_datasets['train'], self.tokenizer)
+                processed_val.to_csv(f'{data_dir}/val.tsv', sep='\t', index=False)
+            if os.path.exists(f'{data_dir}/dev.tsv'):
+                processed_test = pd.read_csv(f'{data_dir}/dev.tsv', sep='\t')
+            else:
+                try:
+                    processed_test = self.seq2seq_process(all_datasets['test'], self.tokenizer)
+                except:
+                    processed_test = self.seq2seq_process(all_datasets['train'], self.tokenizer)
+                processed_test.to_csv(f'{data_dir}/dev.tsv', sep='\t', index=False)
+        
+        print("Grouping data...")
+        self.grouped_train_df = processed_train.groupby('src', as_index=False).agg(list)
+        self.grouped_val_df = processed_val.groupby('src', as_index=False).agg(list)
+        self.grouped_test_df = processed_test.groupby('src', as_index=False).agg(list)
+        print("Grouping done!")
+    
+    
+    def train_length_predictor(self):
+        print("Starting sentence encoding...")
+        sample = self.grouped_train_df.sample(n=100)
+        # src_embeds = self.attacker.sent_encoder.encode(self.grouped_train_df['src'].tolist()) # N X D
+        src_embeds = self.attacker.sent_encoder.encode(sample['src'].tolist()) # N X D
+        print("Sentence encoding done!")
+        X_train = src_embeds.detach().cpu().numpy() # N X D
+        # Y_train = self.grouped_train_df['tgt_len'].apply(lambda x: np.mean(x)).to_numpy(dtype=np.float32) # N
+        Y_train = sample['tgt_len'].apply(lambda x: np.mean(x)).to_numpy(dtype=np.float32) # N
+        print("Fitting light weight model...")
+        self.regr = MLPRegressor(random_state=1, max_iter=500).fit(X_train, Y_train)
+        print("Fitting done!")
+        
+        
+    def get_single_uncertainty(
+        self, 
+        test_src: str, 
+        model: MLPRegressor = None,
+        rule_func: Callable = None,
+        strategy: str = 'lw',
+    ):  
+        start = time.time()
+        test_src_embeds = self.attacker.sent_encoder.encode([test_src]) # 1 X D
+        X_test = test_src_embeds.detach().cpu().numpy() # 1 X D
+        if strategy == 'lw':
+            if model is None:
+                raise ValueError("Model is None!")
+            else:
+                ue_test = model.predict(X_test)
+        elif strategy == 'rule':
+            if rule_func is None:
+                raise ValueError("Rule function is None!")
+            else:
+                ue_test = rule_func(test_src)
+        end = time.time()
+        return ue_test, end - start
+        
+    
+    def get_batch_uncertainty(
+        self, 
+        test_src: pd.Series,
+        model: MLPRegressor = None,
+        rule_func: Callable = None,
+        strategy: str = 'lw',
+    ):  
+        start = time.time()
+        test_src_embeds = self.attacker.sent_encoder.encode(test_src.tolist()) # N X D
+        X_test = test_src_embeds.detach().cpu().numpy()
+        if strategy == 'lw':
+            if model is None:
+                raise ValueError("Model is None!")
+            else:
+                ue_test = model.predict(X_test)
+        elif strategy == 'rule':
+            if rule_func is None:
+                raise ValueError("Rule function is None!")
+            else:
+                ue_test = test_src.apply(rule_func)
+        end = time.time()
+        return ue_test, end - start
+    
 
     def eval_metrics(self, output: str, guided_messages: List[str]):
         if not output:
@@ -186,22 +336,38 @@ class DGAttackEval(DGDataset):
             text = original_context + self.sp_token + free_message
             output, time_gap = self.get_prediction(text)
             self.log_and_save(f"G--{output}")
+            # Get uncertainty
+            lw_ue, lw_gap = self.get_single_uncertainty(text, model=self.regr, strategy='lw')
+            rule1_ue, rule1_gap = self.get_single_uncertainty(text, rule_func=output_score1, strategy='rule')
+            rule2_ue, rule2_gap = self.get_single_uncertainty(text, rule_func=output_score2, strategy='rule')
+            rule3_ue, rule3_gap = self.get_single_uncertainty(text, rule_func=output_score3, strategy='rule')
+            rule4_ue, rule4_gap = self.get_single_uncertainty(text, rule_func=output_score4, strategy='rule')
             
             if not output:
                 continue
             bleu_res, rouge_res, meteor_res, pred_len = self.eval_metrics(output, references)
             if self.pred_only:
-                self.pred_res.append((
-                    self.model_n,
-                    text, 
-                    output,
-                    references,
-                    pred_len, 
-                    bleu_res['bleu'], 
-                    rouge_res['rougeL'], 
-                    meteor_res['meteor'],
-                    time_gap, 
-                ))
+                self.pred_res.append({
+                    "model": self.model_n,
+                    "src": text, 
+                    "pred": output,
+                    "pred_len": pred_len, 
+                    "refs": references,
+                    "bleu": bleu_res['bleu'], 
+                    "rouge": rouge_res['rougeL'], 
+                    "meteor": meteor_res['meteor'],
+                    "infer_time": time_gap, 
+                    "lw_ue": lw_ue,
+                    "lw_time": lw_gap,
+                    "rule1_ue": rule1_ue,
+                    "rule1_time": rule1_gap,
+                    "rule2_ue": rule2_ue,
+                    "rule2_time": rule2_gap,
+                    "rule3_ue": rule3_ue,
+                    "rule3_time": rule3_gap,
+                    "rule4_ue": rule4_ue,
+                    "rule4_time": rule4_gap,
+                })
             
             self.log_and_save("(length: {}, latency: {:.3f}, BLEU: {:.3f}, ROUGE: {:.3f}, METEOR: {:.3f})".format(
                 pred_len, time_gap, bleu_res['bleu'], rouge_res['rougeL'], meteor_res['meteor'],
@@ -273,7 +439,9 @@ class DGAttackEval(DGDataset):
         ))
         
         if self.pred_only:
-            torch.save(self.pred_res, self.res_path)
+            pred_df = pd.DataFrame(self.pred_res)
+            # torch.save(self.pred_res, self.res_path)
+            pred_df.to_csv(self.res_path, index=False)
         else:
             Adv_len = np.mean(self.adv_lens)
             Adv_bleu = np.mean(self.adv_bleus)
@@ -380,6 +548,13 @@ def main(args: argparse.Namespace):
         meteor=meteor,
         pred_only=pred_only,
     )
+    
+    # Get seq2seq datasets
+    dg.get_seq2seq_dataset(all_datasets)
+    
+    # Train length predictor
+    dg.train_length_predictor()
+
     dg.generation(test_dataset)
 
 
